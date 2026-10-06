@@ -1,6 +1,6 @@
 [package]
 name = "claude-windows-cn"
-version = "0.2.0"
+version = "0.2.1"
 description = "管理 Windows 和 macOS 上的 Claude Desktop 并提供可选汉化。"
 authors = ["Claude Desktop Zh contributors"]
 license = "MIT"

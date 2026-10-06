@@ -285,6 +285,7 @@ fn run_desktop_script(contents: &str, operation: &OperationState) -> Result<(), 
 }
 
 pub(crate) fn close_desktop_script(package: &ClaudePackage, sid: &str, session: u32) -> String {
+    let job_helper = include_str!("claude_job.cs");
     format!(
         r#"$ErrorActionPreference='Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
@@ -294,6 +295,11 @@ $session={session}
 {PROCESS_CIM_METHOD}
 $registered=@(Get-AppxPackage -User $callerSid -Name Claude -ErrorAction Stop | Where-Object {{ $_.PackageFullName -eq {full} -and $_.InstallLocation -eq {root} }})
 if ($registered.Count -ne 1) {{ throw '提权后无法确认原调用用户的 Claude Appx 包。' }}
+if (-not ('ClaudeDesktopJob' -as [type])) {{
+    Add-Type -TypeDefinition @'
+{job_helper}
+'@
+}}
 function Get-TargetClaudeProcesses {{
     foreach ($item in @(Get-CimInstance Win32_Process -Filter "Name='Claude.exe'" -ErrorAction Stop)) {{
         if ($item.SessionId -ne $session -or $item.ExecutablePath -ne $target) {{ continue }}
@@ -319,6 +325,9 @@ if ($service -and $service.State -ne 'Stopped') {{
     }} while ($true)
 }}
 Write-Output '结束当前用户、当前会话的官方 Claude Desktop 进程'
+# Close package-job descendants first, including orphans without package identity.
+# Keep the exact-executable fallback for Desktop versions without a container job.
+[ClaudeDesktopJob]::Close({full}, $callerSid, [uint32]$session)
 foreach ($item in @(Get-TargetClaudeProcesses)) {{
     # Refresh each CIM instance to avoid acting on an exited/reused process ID.
     $current=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $item.ProcessId) -ErrorAction Stop
@@ -533,7 +542,7 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
 fn appx_install_error_summary(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if lower.contains("0x80073d02") || lower.contains("0x8007001f") {
-        "Windows 仍报告 Claude 包被占用，请重启 Windows 后重试；已校验的下载包会保留。"
+        "Windows 仍报告 Claude 包被占用，请关闭相关任务后重试并查看执行日志；已校验的下载包会保留。"
     } else {
         "Appx 注册失败，详细原因见执行日志。"
     }
@@ -999,6 +1008,60 @@ function Invoke-CimMethod {{ [pscustomobject]@{{ReturnValue=0;Sid={owner}}} }}
     }
 
     #[test]
+    fn close_flow_clears_orphaned_job_without_touching_unrelated_processes() {
+        let (sid, session) = util::caller_identity().unwrap();
+        let full = format!(
+            "Claude_JobFixture_{}_{}_x64__pzs8sxrjxfjjc",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let package = ClaudePackage {
+            package_full_name: full.clone(),
+            package_family_name: FAMILY.into(),
+            version: "0.0.0.0".into(),
+            architecture: "X64".into(),
+            install_location: format!(r"C:\fixture\{full}"),
+        };
+        let closing = close_desktop_script(&package, &sid, session);
+        let legacy_closing = closing.replace(
+            &format!(
+                "[ClaudeDesktopJob]::Close({}, $callerSid, [uint32]$session)",
+                ps_quote(&full)
+            ),
+            "# Legacy executable-path-only shutdown",
+        );
+        let script = format!(
+            r#"$ErrorActionPreference='Stop'
+$fixturePackage={full}
+$fixtureSid={sid}
+$fixtureSession=[uint32]{session}
+function Get-AppxPackage {{ [pscustomobject]@{{PackageFullName=$fixturePackage;InstallLocation={root}}} }}
+function Get-CimInstance {{ return $null }}
+Add-Type -TypeDefinition @'
+{helper}
+'@
+$closeFixture={{ {closing} }}
+$legacyCloseFixture={{ {legacy_closing} }}
+{fixture}
+"#,
+            full = ps_quote(&full),
+            sid = ps_quote(&sid),
+            root = ps_path(&package.root()),
+            helper = include_str!("claude_job.cs"),
+            fixture = include_str!("../../tests/windows_claude_job.ps1"),
+        );
+        let path = std::env::temp_dir().join(format!("{full}.ps1"));
+        util::write_script(&path, &script).unwrap();
+        let result = util::run_script(&path);
+        fs::remove_file(path).unwrap();
+        let output = result.unwrap();
+        assert!(output.lines().any(|line| line.trim() == "PASS"), "{output}");
+    }
+
+    #[test]
     fn close_flow_reuses_updater_sequence_and_limits_targets() {
         let package = ClaudePackage {
             package_full_name: "Claude_2.1.0.0_x64__pzs8sxrjxfjjc".into(),
@@ -1217,11 +1280,11 @@ function Get-Item {{
     }
 
     #[test]
-    fn appx_busy_errors_explain_restart_and_preserved_download() {
+    fn appx_busy_errors_explain_retry_and_preserved_download() {
         for error in ["HRESULT: 0x80073D02", "部署错误 0x8007001f (0x80073CF9)"] {
             assert_eq!(
                 appx_install_error_summary(error),
-                "Windows 仍报告 Claude 包被占用，请重启 Windows 后重试；已校验的下载包会保留。"
+                "Windows 仍报告 Claude 包被占用，请关闭相关任务后重试并查看执行日志；已校验的下载包会保留。"
             );
         }
         assert_eq!(
