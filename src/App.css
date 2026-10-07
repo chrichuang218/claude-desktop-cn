@@ -44,7 +44,7 @@
     #claude-assistant-sketch .ca-text-button:hover { text-decoration:underline; text-underline-offset:3px; }
     #claude-assistant-sketch .ca-update { padding:14px 16px; border-radius:7px; margin-bottom:18px; display:flex; justify-content:space-between; gap:12px; align-items:center; background:var(--ca-tint); }
     #claude-assistant-sketch .ca-update p { font-size:13px; color:var(--ca-muted); margin-top:3px; }
-    #claude-assistant-sketch .ca-label { color:var(--ca-muted); font-size:13px; margin:0 0 10px; }
+    #claude-assistant-sketch .ca-label { color:var(--ca-muted); font-size:13px; margin:0 0 10px; overflow-wrap:anywhere; }
     #claude-assistant-sketch .ca-mode { display:flex; gap:13px; align-items:flex-start; min-height:110px; padding:26px 22px; background:var(--ca-surface); border:1px solid var(--ca-line); border-radius:8px; margin:0; flex-shrink:0; }
     #claude-assistant-sketch .ca-mode:has(input:checked) { border-color:var(--ca-accent); background:var(--ca-tint); }
     #claude-assistant-sketch .ca-mode input { accent-color:var(--ca-accent); margin:4px 0 0; width:15px; height:15px; flex-shrink:0; }

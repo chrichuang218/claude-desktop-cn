@@ -448,7 +448,7 @@ function App() {
     setConfirm({ title, text, accept: confirmationLabels[kind] ?? title, action: () => { void startOperation(kind, mode) } })
   }
 
-  const localizeCopy = !claude ? '正在读取 Claude 状态。' : !claude.installed ? '先安装 Claude，再选择是否汉化。' : claude.patchRecoveryRequired ? '上次汉化未完成，需人工核查本次备份与文件。' : claude.externalLocalization ? '检测到其他来源的中文资源或备份，助手不会接管。' : claude.appliedMode ? `已应用汉化 · ${claude.appliedMode === 'full' ? '完整汉化' : 'Cowork 兼容'}` : '未应用汉化，按需开启。'
+  const localizeCopy = !claude ? '正在读取 Claude 状态。' : !claude.installed ? '先安装 Claude，再选择是否汉化。' : claude.patchRecoveryRequired ? "上次汉化未完成，请前往汉化页查看核查位置。" : claude.externalLocalization ? '检测到其他来源的中文资源或备份，助手不会接管。' : claude.appliedMode ? `已应用汉化 · ${claude.appliedMode === 'full' ? '完整汉化' : 'Cowork 兼容'}` : '未应用汉化，按需开启。'
   const patchDisabled = busy || !claude?.installed || claude.externalLocalization || claude.patchRecoveryRequired
   const selectedApplied = claude?.appliedMode === selectedMode
   const applySelectedMode = () => confirmAction(`应用${selectedMode === 'safe' ? ' Cowork 兼容汉化' : '完整汉化'}？`, `将关闭 Claude，备份文件后应用汉化。${selectedMode === 'full' ? '完整汉化可能影响 Cowork。' : ''}`, 'apply_patch', selectedMode)
@@ -517,7 +517,7 @@ function App() {
             </section> : null}
 
             {page === 'localize' ? <section className="ca-pane ca-localize" aria-label="汉化">
-              {claude?.patchRecoveryRequired || claude?.externalLocalization ? <div className="ca-label">{claude.patchRecoveryRequired ? '上次汉化未完成，需人工核查本次备份与文件。' : '检测到其他来源的中文资源或备份，助手不会接管。'}</div> : null}
+              {claude?.patchRecoveryRequired || claude?.externalLocalization ? <div className="ca-label">{claude.patchRecoveryRequired ? claude.message : '检测到其他来源的中文资源或备份，助手不会接管。'}</div> : null}
               {(['safe', 'full'] as const).map((mode) => <label className="ca-mode" key={mode}><input type="radio" name="ca-patch-mode" checked={selectedMode === mode} onChange={() => setSelectedMode(mode)} disabled={busy} /><span><span className="ca-mode-title"><b>{mode === 'safe' ? 'Cowork 兼容' : '完整汉化'}</b>{mode === 'safe' ? <em>推荐</em> : null}{claude?.appliedMode === mode ? <span className="ca-applied" role="status"><Check aria-hidden="true" />已应用</span> : null}</span><p>{mode === 'safe' ? '汉化本地界面，优先保留 Cowork 兼容性。' : '同时汉化在线页面，可能影响 Cowork。'}</p></span></label>)}
               <div className="ca-actions">
                 {selectedApplied ? <button type="button" className="ca-button ca-primary" onClick={() => void openClaude()} disabled={patchDisabled}><Play aria-hidden="true" />打开 Claude</button> : <button type="button" className="ca-button ca-primary" onClick={applySelectedMode} disabled={patchDisabled}><Languages aria-hidden="true" />应用此模式</button>}

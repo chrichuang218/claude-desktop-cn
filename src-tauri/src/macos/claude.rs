@@ -18,7 +18,7 @@ const BUNDLE_ID: &str = "com.anthropic.claudefordesktop";
 const RELEASES_URL: &str = "https://downloads.claude.ai/releases/darwin/universal/RELEASES.json";
 const DOWNLOAD_PREFIX: &str = "https://downloads.claude.ai/releases/darwin/universal/";
 const SIGNING_REQUIREMENT: &str =
-    "anchor apple generic and certificate leaf[subject.OU] = \"Q6L2SF6YDW\"";
+    "=anchor apple generic and certificate leaf[subject.OU] = \"Q6L2SF6YDW\"";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -774,6 +774,28 @@ pub fn create_shortcut(operation: &OperationState) -> Result<OperationOutcome, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signing_requirement_is_inline_and_rejects_another_publisher() {
+        // /bin/ls is signed by Apple, not Anthropic. A parsed requirement must
+        // reject its identity, rather than try to open the expression as a file.
+        let output = Command::new("/usr/bin/codesign")
+            .args([
+                "--verify",
+                "--strict",
+                "--test-requirement",
+                SIGNING_REQUIREMENT,
+                "/bin/ls",
+            ])
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            error.contains("code failed to satisfy specified code requirement"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn official_feed_requires_matching_current_version_and_exact_official_url() {

@@ -129,13 +129,12 @@ pub fn status() -> Result<ClaudeStatus, String> {
         external_localization: state.external_localization,
         patch_recovery_required: state.recovery_required,
         message: if state.recovery_required {
-            "上次汉化未完成，需人工核查本次备份与文件。"
+            patch::recovery_message(&package)?
         } else if state.external_localization {
-            "检测到其他来源的中文资源或备份，助手不会接管。"
+            "检测到其他来源的中文资源或备份，助手不会接管。".into()
         } else {
-            "已检测到官方 Claude Desktop。"
-        }
-        .into(),
+            "已检测到官方 Claude Desktop。".into()
+        },
         update_available: current_update_available(&package.version, cached.as_ref()),
         latest_version: cached
             .as_ref()

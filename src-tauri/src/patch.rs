@@ -181,6 +181,17 @@ fn pending_path() -> Result<PathBuf, String> {
     Ok(util::data_dir()?.join("patch-pending.json"))
 }
 
+pub fn recovery_message(package: &ClaudePackage) -> Result<String, String> {
+    let root = read_pending()?
+        .map(|pending| PathBuf::from(pending.install_location))
+        .unwrap_or_else(|| package.root());
+    Ok(format!(
+        "上次汉化未完成，需人工核查。记录：{}；备份：{}。请保留日志和备份，不要删除整个助手数据目录。",
+        pending_path()?.display(),
+        root.join("app/resources/.zh-cn-backups").display()
+    ))
+}
+
 fn read_pending() -> Result<Option<PendingPatch>, String> {
     let path = pending_path()?;
     if !path.exists() {
@@ -191,10 +202,6 @@ fn read_pending() -> Result<Option<PendingPatch>, String> {
     serde_json::from_str(&raw)
         .map(Some)
         .map_err(|error| format!("未完成汉化记录无效，需人工核查：{error}"))
-}
-
-fn save_pending(pending: &PendingPatch) -> Result<(), String> {
-    util::write_json(&pending_path()?, pending)
 }
 
 fn clear_pending() -> Result<(), String> {
@@ -430,7 +437,7 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     }
     let package = claude::query_package()?.ok_or("未安装官方 Claude Desktop。")?;
     if read_pending()?.is_some() {
-        return Err("上次汉化未完成，需人工核查本次备份与文件。".into());
+        return Err(recovery_message(&package)?);
     }
     let existing = read_manifest()?.filter(|manifest| {
         manifest.package_full_name == package.package_full_name
@@ -453,7 +460,6 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
             install_location: package.install_location.clone(),
             engine_sha256: engine.sha256.clone(),
         };
-        save_pending(&pending)?;
         Some(pending)
     } else {
         None
@@ -461,7 +467,15 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     let result = (|| {
         if let Some(mut manifest) = existing {
             operation.step("按当前版本备份恢复原始文件");
-            run_engine(&engine, &script, &package, "uninstall", "safe", operation)?;
+            run_engine(
+                &engine,
+                &script,
+                &package,
+                "uninstall",
+                "safe",
+                None,
+                operation,
+            )?;
             verify_restored(&manifest, &package)?;
             manifest.applied_mode = None;
             save_manifest(&manifest)?;
@@ -474,6 +488,7 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
             &package,
             "install",
             upstream_mode,
+            pending.as_ref(),
             operation,
         )?;
         let set = unique_backup_set(&backup_root)?;
@@ -508,10 +523,16 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     match (pending, result) {
         (Some(pending), Err(error)) => {
             operation.log(format!("汉化失败：{error}"));
+            // The elevated wrapper records the transaction immediately before engine writes.
+            // UAC / preflight failures have no transaction to roll back.
+            if read_pending()?.is_none() {
+                return Err(error);
+            }
             match rollback_first_apply(&pending, &package, &engine, &script, operation) {
                 Ok(()) => Err(format!("{error}；操作失败但已验证回滚。")),
                 Err(rollback_error) => Err(format!(
-                    "{error}；无法证明安全恢复：{rollback_error}。已保留本次记录，需人工核查。"
+                    "{error}；无法证明安全恢复：{rollback_error}。{}",
+                    recovery_message(&package)?
                 )),
             }
         }
@@ -570,7 +591,15 @@ fn rollback_first_apply(
     };
     validate_backup(&manifest, package)?;
     operation.step("汉化失败，恢复本次备份");
-    run_engine(engine, script, package, "uninstall", "safe", operation)?;
+    run_engine(
+        engine,
+        script,
+        package,
+        "uninstall",
+        "safe",
+        None,
+        operation,
+    )?;
     verify_restored(&manifest, package)?;
     manifest.applied_mode = None;
     save_manifest(&manifest)?;
@@ -581,14 +610,22 @@ fn rollback_first_apply(
 pub fn restore(operation: &OperationState) -> Result<OperationOutcome, String> {
     let package = claude::query_package()?.ok_or("未安装官方 Claude Desktop。")?;
     if read_pending()?.is_some() {
-        return Err("上次汉化未完成，需人工核查本次备份与文件。".into());
+        return Err(recovery_message(&package)?);
     }
     let mut manifest = read_manifest()?.ok_or("没有本助手创建的当前版本备份，无法恢复。")?;
     validate_backup(&manifest, &package)?;
     let engine = fetch_engine(operation)?;
     let script = adapt_engine(&engine, &package)?;
     operation.step("恢复当前 Claude 版本的原始文件");
-    run_engine(&engine, &script, &package, "uninstall", "safe", operation)?;
+    run_engine(
+        &engine,
+        &script,
+        &package,
+        "uninstall",
+        "safe",
+        None,
+        operation,
+    )?;
     verify_restored(&manifest, &package)?;
     manifest.applied_mode = None;
     manifest.engine_sha256 = engine.sha256;
@@ -811,15 +848,52 @@ fn run_engine(
     package: &ClaudePackage,
     action: &str,
     mode: &str,
+    pending: Option<&PendingPatch>,
     operation: &OperationState,
+) -> Result<String, String> {
+    let work = engine.root.parent().ok_or("引擎工作目录无效。")?;
+    let wrapper = work.join(format!("run-{action}.ps1"));
+    let record_path = pending_path()?;
+    let script_content = engine_wrapper(
+        script,
+        package,
+        action,
+        mode,
+        pending.map(|p| (p, record_path.as_path())),
+    )?;
+    util::write_script(&wrapper, &script_content)?;
+    util::run_elevated_script_with_logs(&wrapper, work, |chunk| operation.log(chunk))
+}
+
+fn engine_wrapper(
+    script: &Path,
+    package: &ClaudePackage,
+    action: &str,
+    mode: &str,
+    pending: Option<(&PendingPatch, &Path)>,
 ) -> Result<String, String> {
     let caller_sid =
         util::powershell("[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value")?;
     if caller_sid.is_empty() {
         return Err("无法确认原调用用户 SID。".into());
     }
-    let work = engine.root.parent().ok_or("引擎工作目录无效。")?;
-    let wrapper = work.join(format!("run-{action}.ps1"));
+    let record_pending = if let Some((pending, path)) = pending {
+        // Use the original user's absolute path even when UAC uses another account.
+        // CreateNew refuses to overwrite another unfinished transaction.
+        format!(
+            r#"
+            $record=[System.IO.File]::Open({path}, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try {{
+                $bytes=[System.Text.Encoding]::UTF8.GetBytes({json})
+                $record.Write($bytes, 0, $bytes.Length)
+            }} finally {{ $record.Dispose() }}
+        "#,
+            path = ps_path(path),
+            json = ps_quote(serde_json::to_string(pending).map_err(|e| e.to_string())?)
+        )
+    } else {
+        String::new()
+    };
     let expected_root = package.root();
     let script_content = format!(
         r#"$ErrorActionPreference='Stop'
@@ -837,6 +911,7 @@ fn run_engine(
         $restoreCowork=($service -and $service.State -eq 'Running' -and $service.PathName.Trim().Trim('"') -eq {service_path})
         $failure=$null
         try {{
+            {record_pending}
             & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} {action} 'zh-CN' -PatchMode {mode} -OriginalUserSid $sid -OriginalUserProfile {profile} -OriginalAppData {roaming} -OriginalLocalAppData {local}
             if ($LASTEXITCODE -ne 0) {{ throw "汉化脚本退出码 $LASTEXITCODE" }}
         }} catch {{ $failure=$_ }} finally {{
@@ -864,13 +939,80 @@ fn run_engine(
         roaming = ps_quote(env::var("APPDATA").map_err(|_| "无法读取当前用户 AppData。")?),
         local = ps_quote(env::var("LOCALAPPDATA").map_err(|_| "无法读取当前用户 LocalAppData。")?),
     );
-    util::write_script(&wrapper, &script_content)?;
-    util::run_elevated_script_with_logs(&wrapper, work, |chunk| operation.log(chunk))
+    Ok(script_content)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_record_starts_only_after_preflight_and_survives_engine_failure() {
+        let root = env::temp_dir().join(format!("issue-2-regression-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let package = ClaudePackage {
+            package_full_name: "fixture".into(),
+            version: "1".into(),
+            install_location: root.join("package").display().to_string(),
+            package_family_name: "fixture".into(),
+            architecture: "X64".into(),
+        };
+        let pending = PendingPatch {
+            package_full_name: package.package_full_name.clone(),
+            version: package.version.clone(),
+            install_location: package.install_location.clone(),
+            engine_sha256: "fixture".into(),
+        };
+        fs::create_dir_all(package.exe().parent().unwrap()).unwrap();
+        fs::write(package.exe(), "fixture").unwrap();
+        let record = root.join("pending.json");
+        let wrapper = engine_wrapper(
+            &root.join("unused.ps1"),
+            &package,
+            "install",
+            "safe",
+            Some((&pending, &record)),
+        )
+        .unwrap();
+        for (stage, expected, recorded) in [
+            ("identity", "提权后无法确认", false),
+            ("takeown", "获取 Claude app 写权限失败", false),
+            ("icacls", "设置 Claude app 写权限失败", false),
+            ("engine", "fixture engine failed", true),
+        ] {
+            // Run the real wrapper with only OS mutations and the engine replaced.
+            // It never touches an installed package or invokes UAC.
+            let mocks = format!(
+                r#"
+                $stage={stage}
+                function Get-AppxPackage {{ if ($stage -ne 'identity') {{ [pscustomobject]@{{ PackageFullName='fixture'; InstallLocation={location} }} }} }}
+                function takeown.exe {{ $global:LASTEXITCODE=[int]($stage -eq 'takeown') }}
+                function icacls.exe {{ $global:LASTEXITCODE=[int]($stage -eq 'icacls') }}
+                function Get-CimInstance {{ }}
+                function powershell.exe {{
+                    if (-not (Test-Path -LiteralPath {record})) {{ throw 'missing transaction record before engine writes' }}
+                    throw 'fixture engine failed'
+                }}
+            "#,
+                stage = ps_quote(stage),
+                location = ps_quote(&package.install_location),
+                record = ps_path(&record)
+            );
+            let script = root.join("wrapper.ps1");
+            util::write_script(&script, &format!("{mocks}\n{wrapper}")).unwrap();
+            let error = util::run_script(&script).unwrap_err();
+            assert!(error.contains(expected), "{stage}: {error}");
+            assert_eq!(record.exists(), recorded, "{stage}");
+        }
+        let saved: PendingPatch = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        assert_eq!(saved.install_location, package.install_location);
+        assert_eq!(saved.engine_sha256, pending.engine_sha256);
+        // An existing recovery record must never be overwritten.
+        fs::write(&record, "previous transaction").unwrap();
+        assert!(util::run_script(&root.join("wrapper.ps1")).is_err());
+        assert_eq!(fs::read_to_string(&record).unwrap(), "previous transaction");
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     #[ignore = "Downloads the live engine twice in an isolated process; no Claude writes"]
