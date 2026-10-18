@@ -620,17 +620,16 @@ function App() {
               <div className="ca-status-card">
                 <div className="ca-row"><div><h3>应用更新</h3><p>{claude?.updateCheckError || (claude?.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</p></div><button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy || !claude?.installed}><RefreshCw aria-hidden="true" />检查更新</button></div>
                 <div className="ca-row"><div><h3>中文界面</h3><p data-warning={Boolean(claude?.patchRecoveryRequired || staleMode)}>{localizeCopy}</p></div><button type="button" className="ca-text-button" onClick={() => navigate('localize')} disabled={busy || !claude?.installed}>前往汉化<ArrowRight aria-hidden="true" /></button></div>
+                {claude?.installed ? <details className="ca-details">
+                  <summary className="ca-row"><div><h3>详细信息</h3><p>{claude.backupReady ? '原始备份可恢复' : '无可用原始备份'}</p></div><span className="ca-text-button">查看<ChevronDown aria-hidden="true" /></span></summary>
+                  <dl>
+                    <dt>包名</dt><dd>{claude.packageFullName || '未知'}</dd>
+                    <dt>安装位置</dt><dd>{claude.installPath || '未知'}</dd>
+                    <dt>原始备份</dt><dd>{claude.backupReady ? '可恢复' : '无可用备份'}</dd>
+                  </dl>
+                  <div className="ca-details-actions"><button type="button" className="ca-text-button" onClick={() => void copyText('details', diagnostics())}><ClipboardCopy aria-hidden="true" />{copied === 'details' ? '已复制' : '复制诊断信息'}</button></div>
+                </details> : null}
               </div>
-              {claude?.installed ? <details className="ca-details">
-                <summary><ChevronDown aria-hidden="true" />详细信息</summary>
-                <dl>
-                  <dt>版本</dt><dd>{claude.version || '未知'}</dd>
-                  <dt>包名</dt><dd>{claude.packageFullName || '未知'}</dd>
-                  <dt>安装位置</dt><dd>{claude.installPath || '未知'}</dd>
-                  <dt>原始备份</dt><dd>{claude.backupReady ? '可恢复' : '无可用备份'}</dd>
-                </dl>
-                <div className="ca-details-actions"><button type="button" className="ca-text-button" onClick={() => void copyText('details', diagnostics())}><ClipboardCopy aria-hidden="true" />{copied === 'details' ? '已复制' : '复制诊断信息'}</button></div>
-              </details> : null}
             </section> : null}
 
             {page === 'localize' ? <section className="ca-pane ca-localize" aria-label="汉化">

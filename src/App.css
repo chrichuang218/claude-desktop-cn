@@ -68,15 +68,16 @@
     #claude-assistant-sketch .ca-status-card > .ca-row:first-child { border-top:0; }
     #claude-assistant-sketch .ca-row p[data-warning="true"] { color:var(--ca-warn); }
     #claude-assistant-sketch .ca-checked { color:var(--ca-muted); opacity:.85; }
-    #claude-assistant-sketch .ca-details { margin-top:12px; font-size:13px; flex-shrink:0; }
-    #claude-assistant-sketch .ca-details summary { display:inline-flex; align-items:center; gap:6px; color:var(--ca-muted); list-style:none; padding:4px 0; border-radius:4px; }
-    #claude-assistant-sketch .ca-details summary::-webkit-details-marker { display:none; }
-    #claude-assistant-sketch .ca-details summary svg { width:15px; height:15px; transform:rotate(-90deg); transition:transform 150ms ease; }
-    #claude-assistant-sketch .ca-details[open] summary svg { transform:none; }
-    #claude-assistant-sketch .ca-details dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 16px; margin:8px 0 0; padding:12px 14px; border:1px solid var(--ca-line); border-radius:8px; background:var(--ca-surface); }
+    #claude-assistant-sketch .ca-details { border-top:1px solid var(--ca-line); }
+    #claude-assistant-sketch .ca-details > summary { padding:14px 0; border-top:0; list-style:none; cursor:pointer; }
+    #claude-assistant-sketch .ca-details > summary::-webkit-details-marker { display:none; }
+    #claude-assistant-sketch .ca-details > summary:hover .ca-text-button { text-decoration:underline; text-underline-offset:3px; }
+    #claude-assistant-sketch .ca-details > summary svg { width:15px; height:15px; transition:transform 150ms ease; }
+    #claude-assistant-sketch .ca-details[open] > summary svg { transform:rotate(180deg); }
+    #claude-assistant-sketch .ca-details dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 16px; margin:0; padding:2px 0 0; font-size:13px; }
     #claude-assistant-sketch .ca-details dt { color:var(--ca-muted); }
     #claude-assistant-sketch .ca-details dd { margin:0; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; user-select:text; }
-    #claude-assistant-sketch .ca-details-actions { margin-top:6px; }
+    #claude-assistant-sketch .ca-details-actions { margin:6px 0 10px; font-size:13px; }
     #claude-assistant-sketch .ca-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ca-danger); margin:0 0 10px -4px; }
     #claude-assistant-sketch .ca-release-notes { margin:2px 0 8px; padding:10px 12px; border:1px solid var(--ca-line); border-radius:7px; background:var(--ca-surface); max-height:150px; overflow:auto; }
     #claude-assistant-sketch .ca-release-notes h4 { margin:0 0 4px; font-size:12px; font-weight:600; }
@@ -197,7 +198,7 @@
       #claude-assistant-sketch .ca-main { padding:16px 24px; }
       #claude-assistant-sketch .ca-hero { min-height:100px; }
       #claude-assistant-sketch .ca-overview > .ca-hero { min-height:84px; }
-      #claude-assistant-sketch .ca-status-card > .ca-row { padding:10px 0; }
+      #claude-assistant-sketch .ca-status-card > .ca-row, #claude-assistant-sketch .ca-details > summary { padding:10px 0; }
       #claude-assistant-sketch .ca-localize > .ca-mode { min-height:0; padding:16px; }
       #claude-assistant-sketch .ca-localize > .ca-mode + .ca-mode { margin-top:10px; }
     }
