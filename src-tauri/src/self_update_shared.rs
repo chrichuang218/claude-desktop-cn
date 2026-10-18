@@ -182,6 +182,23 @@ mod repository_tests {
         assert_eq!(failed.error.as_deref(), Some("network unavailable"));
     }
 
+    #[test]
+    fn cached_assistant_flag_follows_the_running_version() {
+        let cached = |latest: &str| CachedUpdate {
+            checked_at: "1".into(),
+            update_available: Some(true),
+            latest_version: Some(latest.into()),
+            error: None,
+            release_notes: None,
+        };
+        // Written by an older binary, read after updating to that release.
+        let current = env!("CARGO_PKG_VERSION");
+        assert_eq!(refresh_assistant_availability(cached(current)).update_available, Some(false));
+        assert_eq!(refresh_assistant_availability(cached("999.0.0")).update_available, Some(true));
+        let failed = CachedUpdate { latest_version: None, update_available: None, ..cached(current) };
+        assert_eq!(refresh_assistant_availability(failed).update_available, None);
+    }
+
     pub(super) fn fake_release(names: &[&str]) -> Release {
         Release {
             tag_name: "v9.9.9".into(),
@@ -372,7 +389,19 @@ fn save_assistant_cache(update: &CachedUpdate) -> Result<(), String> {
 
 pub fn cached_assistant_update() -> Result<Option<CachedUpdate>, String> {
     let _guard = CACHE_LOCK.lock().map_err(|error| error.to_string())?;
-    Ok(read_cache()?.assistant)
+    Ok(read_cache()?.assistant.map(refresh_assistant_availability))
+}
+
+// The cache outlives the binary that wrote it; after a self-update the stored
+// flag still compares against the old version, so recompute it on read.
+fn refresh_assistant_availability(mut cached: CachedUpdate) -> CachedUpdate {
+    if let Some(latest) = cached.latest_version.as_deref() {
+        cached.update_available = Some(
+            claude::compare_versions(latest, env!("CARGO_PKG_VERSION"))
+                == std::cmp::Ordering::Greater,
+        );
+    }
+    cached
 }
 
 pub fn cached_claude_update() -> Result<Option<CachedUpdate>, String> {

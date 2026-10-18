@@ -99,7 +99,14 @@ pub fn install(operation: &OperationState) -> Result<OperationOutcome, String> {
     if result.exists() {
         fs::remove_file(&result).map_err(|error| error.to_string())?;
     }
-    let content = updater_script(std::process::id(), &target, &executable, &backup, &result);
+    let content = updater_script(
+        std::process::id(),
+        &target,
+        &executable,
+        &backup,
+        &result,
+        &release.version,
+    );
     util::write_script(&script, &content)?;
     let elevated = target.starts_with(
         env::var_os("ProgramFiles")
@@ -124,7 +131,14 @@ pub fn install(operation: &OperationState) -> Result<OperationOutcome, String> {
     ))
 }
 
-fn updater_script(pid: u32, target: &Path, staged: &Path, backup: &Path, result: &Path) -> String {
+fn updater_script(
+    pid: u32,
+    target: &Path,
+    staged: &Path,
+    backup: &Path,
+    result: &Path,
+    version: &str,
+) -> String {
     format!(
         r#"$ErrorActionPreference='Stop'
         $target={target}; $staged={staged}; $backup={backup}; $result={result}
@@ -135,6 +149,20 @@ fn updater_script(pid: u32, target: &Path, staged: &Path, backup: &Path, result:
             Copy-Item -LiteralPath $staged -Destination $target -Force -ErrorAction Stop
             $process=Start-Process -FilePath $target -PassThru -ErrorAction Stop
             if (-not $process) {{ throw '新版助手未启动。' }}
+            # Version records are informational; never roll back a working exe over them.
+            try {{
+                $manifest=Join-Path (Split-Path -Parent $target) 'install.json'
+                if (Test-Path -LiteralPath $manifest) {{
+                    $record=Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+                    $record.version={version}
+                    [IO.File]::WriteAllText($manifest, ($record | ConvertTo-Json), (New-Object System.Text.UTF8Encoding $false))
+                }}
+                foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWindowsCN','HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeWindowsCN') {{
+                    if ((Test-Path -LiteralPath $key) -and (Get-ItemProperty -Path $key).DisplayIcon -eq $target) {{
+                        Set-ItemProperty -Path $key -Name DisplayVersion -Value {version} -ErrorAction SilentlyContinue
+                    }}
+                }}
+            }} catch {{ }}
             @{{ ok=$true; message='更新成功。' }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $result -Encoding UTF8
         }} catch {{
             $reason=$_.Exception.Message
@@ -150,6 +178,7 @@ fn updater_script(pid: u32, target: &Path, staged: &Path, backup: &Path, result:
         staged = ps_path(staged),
         backup = ps_path(backup),
         result = ps_path(result),
+        version = ps_quote(version),
     )
 }
 
@@ -197,6 +226,7 @@ mod tests {
                 "old.bak",
                 "result.json",
                 "update.ps1",
+                "install.json",
             ] {
                 let _ = fs::remove_file(self.path(name));
             }
@@ -244,6 +274,7 @@ mod tests {
             Path::new("C:\\next.exe"),
             Path::new("C:\\old.exe"),
             Path::new("C:\\result.json"),
+            "9.9.9",
         );
         assert!(script.contains("Copy-Item -LiteralPath $backup -Destination $target -Force"));
     }
@@ -262,7 +293,7 @@ mod tests {
         // A nonexistent PID lets the script enter the replacement branch without waiting.
         util::write_script(
             &script,
-            &updater_script(2_000_000_000, &target, &staged, &backup, &result),
+            &updater_script(2_000_000_000, &target, &staged, &backup, &result, "9.9.9"),
         )
         .unwrap();
         util::run_script(&script).unwrap();
@@ -276,5 +307,42 @@ mod tests {
         assert!(!recorded.message.is_empty());
         assert_eq!(fs::read(&backup).unwrap(), b"old executable bytes");
         assert_eq!(fs::read(&target).unwrap(), b"old executable bytes");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn successful_replacement_records_new_version() {
+        let fixture = Fixture::new();
+        let target = fixture.path("claude-windows-cn.exe");
+        let staged = fixture.path("new.exe");
+        let manifest = fixture.path("install.json");
+        let script = fixture.path("update.ps1");
+        // Any real executable that exits on its own stands in for the new build.
+        let system = PathBuf::from(env::var_os("WINDIR").unwrap()).join("System32");
+        fs::copy(system.join("whoami.exe"), &target).unwrap();
+        fs::copy(system.join("whoami.exe"), &staged).unwrap();
+        fs::write(
+            &manifest,
+            r#"{"product":"claude-windows-cn","mode":"portable","installPath":"x","version":"0.0.1"}"#,
+        )
+        .unwrap();
+        util::write_script(
+            &script,
+            &updater_script(
+                2_000_000_000,
+                &target,
+                &staged,
+                &fixture.path("old.bak"),
+                &fixture.path("result.json"),
+                "9.9.9",
+            ),
+        )
+        .unwrap();
+        util::run_script(&script).unwrap();
+        // Read without BOM stripping, exactly as assistant::read_manifest does.
+        let record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(record["version"], "9.9.9");
+        assert_eq!(record["installPath"], "x");
     }
 }
