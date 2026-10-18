@@ -1,6 +1,6 @@
-    #claude-assistant-sketch { --ca-bg: #faf9f6; --ca-surface: #fff; --ca-ink: #292722; --ca-muted: #716b63; --ca-line: #e4e0d8; --ca-accent: #a84f35; --ca-on-accent: #fff; --ca-tint: #f5ebe4; --ca-good: #367458; --ca-hover: #e9e5dd; --ca-danger: #ae3e37; --ca-warn-bg: #fbf1e2; --ca-warn-line: #ebcf9f; --ca-warn: #8a5a12; --ca-scrim: #15131135; --ca-focus: #a84f3566; color-scheme: light; width:100%; height:100vh; color:var(--ca-ink); font-family:"Segoe UI Variable Text","Microsoft YaHei UI","Segoe UI",sans-serif; font-size:14px; line-height:1.5; }
+    #claude-assistant-sketch { --ca-bg: #faf9f6; --ca-surface: #fff; --ca-ink: #292722; --ca-muted: #716b63; --ca-line: #e4e0d8; --ca-accent: #a84f35; --ca-on-accent: #fff; --ca-tint: #f5ebe4; --ca-good: #367458; --ca-hover: #e9e5dd; --ca-danger: #ae3e37; --ca-warn-bg: #fbf1e2; --ca-warn-line: #ebcf9f; --ca-warn: #8a5a12; --ca-scrim: #15131135; --ca-focus: #a84f3566; --ca-glow: #a84f3530; color-scheme: light; width:100%; height:100vh; color:var(--ca-ink); font-family:"Segoe UI Variable Text","Microsoft YaHei UI","Segoe UI",sans-serif; font-size:14px; line-height:1.5; }
     @media (prefers-color-scheme: dark) {
-      #claude-assistant-sketch { --ca-bg: #1f1e1b; --ca-surface: #2a2925; --ca-ink: #ece9e2; --ca-muted: #a8a299; --ca-line: #3b3934; --ca-accent: #d9785a; --ca-on-accent: #1c1310; --ca-tint: #3a2b24; --ca-good: #6dbb92; --ca-hover: #34322d; --ca-danger: #ec7a70; --ca-warn-bg: #342a1b; --ca-warn-line: #6b5228; --ca-warn: #e8bd73; --ca-scrim: #00000080; --ca-focus: #d9785a80; color-scheme: dark; }
+      #claude-assistant-sketch { --ca-bg: #1f1e1b; --ca-surface: #2a2925; --ca-ink: #ece9e2; --ca-muted: #a8a299; --ca-line: #3b3934; --ca-accent: #d9785a; --ca-on-accent: #1c1310; --ca-tint: #3a2b24; --ca-good: #6dbb92; --ca-hover: #34322d; --ca-danger: #ec7a70; --ca-warn-bg: #342a1b; --ca-warn-line: #6b5228; --ca-warn: #e8bd73; --ca-scrim: #00000080; --ca-focus: #d9785a80; --ca-glow: #00000066; color-scheme: dark; }
     }
     #claude-assistant-sketch * { box-sizing:border-box; }
     #claude-assistant-sketch :focus-visible { outline:2px solid var(--ca-accent); outline-offset:2px; }
@@ -68,16 +68,6 @@
     #claude-assistant-sketch .ca-status-card > .ca-row:first-child { border-top:0; }
     #claude-assistant-sketch .ca-row p[data-warning="true"] { color:var(--ca-warn); }
     #claude-assistant-sketch .ca-checked { color:var(--ca-muted); opacity:.85; }
-    #claude-assistant-sketch .ca-details { border-top:1px solid var(--ca-line); }
-    #claude-assistant-sketch .ca-details > summary { padding:14px 0; border-top:0; list-style:none; cursor:pointer; }
-    #claude-assistant-sketch .ca-details > summary::-webkit-details-marker { display:none; }
-    #claude-assistant-sketch .ca-details > summary:hover .ca-text-button { text-decoration:underline; text-underline-offset:3px; }
-    #claude-assistant-sketch .ca-details > summary svg { width:15px; height:15px; transition:transform 150ms ease; }
-    #claude-assistant-sketch .ca-details[open] > summary svg { transform:rotate(180deg); }
-    #claude-assistant-sketch .ca-details dl { display:grid; grid-template-columns:auto minmax(0,1fr); gap:6px 16px; margin:0; padding:2px 0 0; font-size:13px; }
-    #claude-assistant-sketch .ca-details dt { color:var(--ca-muted); }
-    #claude-assistant-sketch .ca-details dd { margin:0; overflow-wrap:anywhere; font-variant-numeric:tabular-nums; user-select:text; }
-    #claude-assistant-sketch .ca-details-actions { margin:6px 0 10px; font-size:13px; }
     #claude-assistant-sketch .ca-dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--ca-danger); margin:0 0 10px -4px; }
     #claude-assistant-sketch .ca-release-notes { margin:2px 0 8px; padding:10px 12px; border:1px solid var(--ca-line); border-radius:7px; background:var(--ca-surface); max-height:150px; overflow:auto; }
     #claude-assistant-sketch .ca-release-notes h4 { margin:0 0 4px; font-size:12px; font-weight:600; }
@@ -133,7 +123,24 @@
     @media(prefers-reduced-motion:reduce) { #claude-assistant-sketch .ca-track[data-indeterminate="true"] > span { animation:none; transform:translateX(100%); } }
     #claude-assistant-sketch .ca-main:is([data-page="overview"], [data-page="localize"], [data-page="settings"]) > .ca-heading { margin-bottom:12px; }
     #claude-assistant-sketch .ca-heading-subtitle { margin-top:6px; font-size:13px; color:var(--ca-muted); }
-    #claude-assistant-sketch .ca-overview > .ca-hero { min-height:104px; }
+    #claude-assistant-sketch .ca-overview > .ca-hero { flex:1 0 auto; gap:22px; min-height:0; margin-bottom:14px; padding:24px 28px; border:1px solid var(--ca-line); border-radius:12px; background:radial-gradient(closest-side, var(--ca-tint), transparent) no-repeat -40px 50% / 300px 240px, var(--ca-surface); }
+    #claude-assistant-sketch .ca-overview .ca-app-icon { width:72px; height:72px; filter:drop-shadow(0 10px 18px var(--ca-glow)); }
+    #claude-assistant-sketch .ca-overview .ca-hero-copy h2 { font-size:30px; line-height:1.2; }
+    #claude-assistant-sketch .ca-overview .ca-version { display:flex; align-items:center; gap:10px; margin-top:8px; }
+    #claude-assistant-sketch .ca-overview .ca-launch { min-width:140px; }
+    /* Banners take part of the room: tighten the hero. */
+    #claude-assistant-sketch .ca-overview:has(> .ca-banner, > .ca-notice) > .ca-hero { padding:18px 24px; }
+    #claude-assistant-sketch .ca-overview:has(> .ca-banner, > .ca-notice) .ca-app-icon { width:56px; height:56px; }
+    #claude-assistant-sketch .ca-overview:has(> .ca-banner, > .ca-notice) .ca-hero-copy h2 { font-size:26px; }
+    #claude-assistant-sketch .ca-overview:has(> .ca-banner, > .ca-notice) .ca-version { margin-top:4px; }
+    #claude-assistant-sketch .ca-state { display:inline-flex; align-items:center; gap:6px; }
+    #claude-assistant-sketch .ca-state::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--ca-muted); }
+    #claude-assistant-sketch .ca-state[data-ok="true"]::before { background:var(--ca-good); box-shadow:0 0 0 3px color-mix(in srgb, var(--ca-good) 18%, transparent); }
+    #claude-assistant-sketch .ca-state + span { padding-left:10px; border-left:1px solid var(--ca-line); }
+    #claude-assistant-sketch .ca-status-card > .ca-row { justify-content:flex-start; gap:14px; }
+    #claude-assistant-sketch .ca-status-card > .ca-row > div { flex:1; }
+    #claude-assistant-sketch .ca-row-icon { width:34px; height:34px; display:grid; place-items:center; flex-shrink:0; border-radius:9px; background:var(--ca-tint); color:var(--ca-accent); }
+    #claude-assistant-sketch .ca-row-icon svg { width:16px; height:16px; }
     #claude-assistant-sketch .ca-localize > .ca-mode + .ca-mode { margin-top:16px; }
     #claude-assistant-sketch .ca-localize > .ca-actions { margin-top:auto; padding-top:20px; gap:20px; flex-shrink:0; }
     #claude-assistant-sketch .ca-localize > .ca-actions > .ca-primary { min-height:42px; padding:8px 18px; }
@@ -197,12 +204,14 @@
     @media (max-height:540px) {
       #claude-assistant-sketch .ca-main { padding:16px 24px; }
       #claude-assistant-sketch .ca-hero { min-height:100px; }
-      #claude-assistant-sketch .ca-overview > .ca-hero { min-height:84px; }
-      #claude-assistant-sketch .ca-status-card > .ca-row, #claude-assistant-sketch .ca-details > summary { padding:10px 0; }
+      #claude-assistant-sketch .ca-overview > .ca-hero { padding:16px 20px; }
+      #claude-assistant-sketch .ca-overview .ca-app-icon { width:56px; height:56px; }
+      #claude-assistant-sketch .ca-overview .ca-hero-copy h2 { font-size:26px; }
+      #claude-assistant-sketch .ca-status-card > .ca-row { padding:10px 0; }
       #claude-assistant-sketch .ca-localize > .ca-mode { min-height:0; padding:16px; }
       #claude-assistant-sketch .ca-localize > .ca-mode + .ca-mode { margin-top:10px; }
     }
     @media (prefers-reduced-motion:reduce) {
       #claude-assistant-sketch .ca-saved { animation:none; }
-      #claude-assistant-sketch .ca-switch, #claude-assistant-sketch .ca-switch::after, #claude-assistant-sketch .ca-details summary svg { transition:none; }
+      #claude-assistant-sketch .ca-switch, #claude-assistant-sketch .ca-switch::after { transition:none; }
     }

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
-import { ArrowRight, Check, ChevronDown, ClipboardCopy, Copy, Download, FolderOpen, Languages, LayoutDashboard, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
+import { ArrowRight, Check, ClipboardCopy, Copy, Download, FolderOpen, Languages, LayoutDashboard, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import './App.css'
@@ -582,12 +582,12 @@ function App() {
             </nav>
           </aside>
           <main className="ca-main" data-page={page}>
-            <header className="ca-heading">
+            {page !== 'overview' ? <header className="ca-heading">
               <div>
                 <h1>{title}</h1>
-                {page === 'overview' || page === 'localize' || page === 'settings' ? <p className="ca-heading-subtitle">{page === 'overview' ? '管理你的 Claude Desktop' : page === 'localize' ? '选择适合你的中文体验' : '偏好设置与助手信息'}</p> : null}
+                {page === 'localize' || page === 'settings' ? <p className="ca-heading-subtitle">{page === 'localize' ? '选择适合你的中文体验' : '偏好设置与助手信息'}</p> : null}
               </div>
-            </header>
+            </header> : null}
             {page === 'startup' && loadError ? <div className="ca-startup"><p role="alert">{loadError}</p><button type="button" className="ca-button" onClick={loadStartup}>重新检测</button></div> : null}
 
             {page === 'startup' && !loadError ? <div className="ca-startup">
@@ -612,23 +612,14 @@ function App() {
 
             {page === 'overview' ? <section className="ca-pane ca-overview" aria-label="概览">
               {noticeBanner}
-              <div className="ca-hero"><img src="/claude-icon.svg" className="ca-app-icon" alt="" /><div className="ca-hero-copy"><h2>Claude Desktop</h2><div className="ca-version">{claude ? claude.installed ? `${claude.version || '未知版本'} · 已安装` : '尚未安装' : '正在检测'}</div></div>
+              <div className="ca-hero"><img src="/claude-icon.svg" className="ca-app-icon" alt="" /><div className="ca-hero-copy"><h2>Claude Desktop</h2><div className="ca-version"><span className="ca-state" data-ok={Boolean(claude?.installed)}>{claude ? claude.installed ? '已安装' : '尚未安装' : '正在检测'}</span>{claude?.installed ? <span>{claude.version || '未知版本'}</span> : null}</div></div>
                 <button type="button" className="ca-button ca-primary ca-launch" onClick={() => claude?.installed ? void openClaude() : confirmAction('安装 Claude', `将下载并安装官方 ${platform === 'macos' ? 'macOS' : 'Windows'} 应用。`, 'install_claude')} disabled={busy || !claude}>{claude?.installed ? <Play aria-hidden="true" /> : <Download aria-hidden="true" />}<span>{claude?.installed ? '打开 Claude' : '安装 Claude'}</span></button>
               </div>
               {claude?.updateAvailable && claude.installed ? <div className="ca-banner"><div><h3>Claude 有新版本</h3><p>{claude.version || '当前版本'} → {claude.latestVersion}{claude.appliedMode && config.autoReapplyPatch ? '；更新后自动重新应用汉化' : ''}</p></div><button type="button" className="ca-button ca-primary" onClick={() => confirmAction('更新 Claude？', `安装过程中会关闭 Claude，请先保存正在进行的工作。${claude.appliedMode ? config.autoReapplyPatch ? `更新完成后会重新应用「${modeNames[claude.appliedMode]}」${platform === 'windows' ? '，可能请求管理员授权' : ''}。` : '官方更新会覆盖当前汉化，之后可在汉化页重新应用。' : ''}`, 'update_claude')} disabled={busy}><Download aria-hidden="true" />立即更新</button></div> : null}
               {staleBanner}
               <div className="ca-status-card">
-                <div className="ca-row"><div><h3>应用更新</h3><p>{claude?.updateCheckError || (claude?.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</p></div><button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy || !claude?.installed}><RefreshCw aria-hidden="true" />检查更新</button></div>
-                <div className="ca-row"><div><h3>中文界面</h3><p data-warning={Boolean(claude?.patchRecoveryRequired || staleMode)}>{localizeCopy}</p></div><button type="button" className="ca-text-button" onClick={() => navigate('localize')} disabled={busy || !claude?.installed}>前往汉化<ArrowRight aria-hidden="true" /></button></div>
-                {claude?.installed ? <details className="ca-details">
-                  <summary className="ca-row"><div><h3>详细信息</h3><p>{claude.backupReady ? '原始备份可恢复' : '无可用原始备份'}</p></div><span className="ca-text-button">查看<ChevronDown aria-hidden="true" /></span></summary>
-                  <dl>
-                    <dt>包名</dt><dd>{claude.packageFullName || '未知'}</dd>
-                    <dt>安装位置</dt><dd>{claude.installPath || '未知'}</dd>
-                    <dt>原始备份</dt><dd>{claude.backupReady ? '可恢复' : '无可用备份'}</dd>
-                  </dl>
-                  <div className="ca-details-actions"><button type="button" className="ca-text-button" onClick={() => void copyText('details', diagnostics())}><ClipboardCopy aria-hidden="true" />{copied === 'details' ? '已复制' : '复制诊断信息'}</button></div>
-                </details> : null}
+                <div className="ca-row"><span className="ca-row-icon"><Download aria-hidden="true" /></span><div><h3>应用更新</h3><p>{claude?.updateCheckError || (claude?.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</p></div><button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy || !claude?.installed}><RefreshCw aria-hidden="true" />检查更新</button></div>
+                <div className="ca-row"><span className="ca-row-icon"><Languages aria-hidden="true" /></span><div><h3>中文界面</h3><p data-warning={Boolean(claude?.patchRecoveryRequired || staleMode)}>{localizeCopy}</p></div><button type="button" className="ca-text-button" onClick={() => navigate('localize')} disabled={busy || !claude?.installed}>前往汉化<ArrowRight aria-hidden="true" /></button></div>
               </div>
             </section> : null}
 
@@ -670,8 +661,7 @@ function App() {
                 {assistantUpdate?.available && assistant?.releaseNotes ? <div className="ca-release-notes"><h4>{assistantUpdate.version} 更新内容</h4><p>{assistant.releaseNotes}</p></div> : null}
                 {assistantUpdate?.available ? <p className="ca-settings-hint">下载后会校验摘要并运行程序自检，失败时自动恢复旧版本。</p> : null}
                 {assistant?.updateResult ? <p className="ca-settings-message" data-error={assistant.updateResultOk === false} role={assistant.updateResultOk === false ? 'alert' : 'status'}>{assistant.updateResult}</p> : null}
-                {settingsNotice && !settingsNotice.includes('卸载脚本已启动') ? <p className="ca-settings-message" role="status">{settingsNotice}</p> : null}
-              </div>
+                {settingsNotice && !settingsNotice.includes('卸载脚本已启动') ? <p className="ca-settings-message" role="status">{settingsNotice}</p> : null}              </div>
               <div className="ca-danger-zone">
                 <div className="ca-settings-row"><div><h3>卸载助手</h3><p>仅移除助手及其创建的入口，Claude Desktop 与个人数据将保留。</p></div><button type="button" className="ca-button ca-danger-button" onClick={() => confirmAction('卸载助手？', '仅移除助手及其创建的入口。Claude Desktop 与个人数据将保留。', 'uninstall_assistant')}>卸载助手</button></div>
                 {assistant?.uninstallResult ? <p className="ca-settings-message" data-error={assistant.uninstallResultOk === false} role={assistant.uninstallResultOk === false ? 'alert' : 'status'}>{assistant.uninstallResult}</p> : null}

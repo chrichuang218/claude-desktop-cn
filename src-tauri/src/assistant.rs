@@ -202,8 +202,11 @@ pub fn status() -> Result<AssistantStatus, String> {
     let path = installed_record()?
         .map(|value| PathBuf::from(value.install_path))
         .unwrap_or(validate_config(&config)?);
-    let manifest = read_manifest(&path)?;
+    let mut manifest = read_manifest(&path)?;
     let installed = manifest.is_some() && path.join(util::EXE_NAME).is_file();
+    if installed && running_installed_exe(&path) {
+        sync_manifest_version(&path, manifest.as_mut());
+    }
     let mode = manifest.as_ref().map(|value| value.mode.clone());
     let shortcut = user_desktop()?.join("Claude Windows 中文助手.lnk");
     let cached = crate::self_update::cached_assistant_update()?;
@@ -238,6 +241,28 @@ pub fn status() -> Result<AssistantStatus, String> {
         uninstall_result: uninstall_result.as_ref().map(|value| value.message.clone()),
         uninstall_result_ok: uninstall_result.map(|value| value.ok),
     })
+}
+
+fn running_installed_exe(path: &Path) -> bool {
+    let canonical = |value: &Path| fs::canonicalize(value).ok();
+    env::current_exe()
+        .ok()
+        .and_then(|exe| canonical(&exe))
+        .is_some_and(|exe| Some(exe) == canonical(&path.join(util::EXE_NAME)))
+}
+
+// Older self-updates replaced only the exe and left install.json at the
+// previous version. The running installed exe is the source of truth.
+fn sync_manifest_version(path: &Path, manifest: Option<&mut InstallManifest>) {
+    let Some(manifest) = manifest else { return };
+    if manifest.version == env!("CARGO_PKG_VERSION") {
+        return;
+    }
+    manifest.version = env!("CARGO_PKG_VERSION").into();
+    // Best effort: a system install may not be writable without elevation.
+    if let Ok(bytes) = serde_json::to_vec_pretty(&*manifest) {
+        let _ = fs::write(path.join("install.json"), bytes);
+    }
 }
 
 fn read_manifest(path: &Path) -> Result<Option<InstallManifest>, String> {
