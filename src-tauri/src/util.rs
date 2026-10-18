@@ -51,8 +51,9 @@ fn powershell_command() -> Command {
 
 pub fn powershell(script: &str) -> Result<String, String> {
     let script = format!(
-        // Windows PowerShell 5.1 may default to SSL3/TLS 1.0, which official endpoints reject.
-        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; try {{ [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 12288 }} catch {{ }}; {script}"
+        // Older .NET defaults Windows PowerShell 5.1 to SSL3/TLS 1.0, which GitHub rejects.
+        // Add TLS 1.2 only then; SystemDefault (0) already lets the OS negotiate.
+        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; if ([int][Net.ServicePointManager]::SecurityProtocol -ne 0) {{ [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 }}; {script}"
     );
     let output = powershell_command()
         .args(["-Command", &script])
