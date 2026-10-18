@@ -43,6 +43,8 @@ pub struct PatchState {
     pub backup_ready: bool,
     pub external_localization: bool,
     pub recovery_required: bool,
+    /// Mode recorded for an older Claude version that an official update replaced.
+    pub previous_mode: Option<String>,
 }
 
 fn record(name: &str) -> Result<PathBuf, String> {
@@ -129,7 +131,12 @@ fn foreign_backup(app: &Path) -> Result<bool, String> {
 
 pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
     let pending = record("patch-pending.json")?.exists();
-    let manifest = read_manifest()?.filter(|m| matches_package(m, package));
+    let recorded = read_manifest()?;
+    let previous_mode = recorded
+        .as_ref()
+        .filter(|m| !matches_package(m, package))
+        .and_then(|m| m.applied_mode.clone());
+    let manifest = recorded.filter(|m| matches_package(m, package));
     // Status polling checks backup availability. Hash the entire bundle only
     // immediately before use, otherwise each UI refresh reads gigabytes.
     let valid = manifest
@@ -145,6 +152,7 @@ pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
         backup_ready: valid,
         external_localization: !valid && (has_locale || foreign_backup(&package.root())?),
         recovery_required: pending,
+        previous_mode,
     })
 }
 

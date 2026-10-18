@@ -35,6 +35,18 @@ svg {
   flex: 0 0 auto;
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f1e1b;
+    --text: #ece9e2;
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--bg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

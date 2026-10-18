@@ -2,8 +2,14 @@ use crate::{assistant, claude, patch, self_update};
 use serde::Serialize;
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard, PoisonError,
+    },
+    time::Instant,
 };
+
+pub const CANCELLED_MESSAGE: &str = "下载已取消，已删除未完成的临时文件。";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +23,9 @@ pub struct OperationSnapshot {
     pub message: String,
     pub update_available: Option<bool>,
     pub latest_version: Option<String>,
+    pub cancelable: bool,
+    #[serde(skip)]
+    download_started: Option<Instant>,
 }
 
 impl Default for OperationSnapshot {
@@ -31,12 +40,17 @@ impl Default for OperationSnapshot {
             message: String::new(),
             update_available: None,
             latest_version: None,
+            cancelable: false,
+            download_started: None,
         }
     }
 }
 
 #[derive(Clone)]
-pub struct OperationState(Arc<Mutex<OperationSnapshot>>);
+pub struct OperationState {
+    snapshot: Arc<Mutex<OperationSnapshot>>,
+    cancel: Arc<AtomicBool>,
+}
 
 pub struct OperationOutcome {
     pub message: String,
@@ -64,11 +78,41 @@ impl OperationOutcome {
 
 impl OperationState {
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(OperationSnapshot::default())))
+        Self {
+            snapshot: Arc::new(Mutex::new(OperationSnapshot::default())),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, OperationSnapshot> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.snapshot.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Only stages that can stop without leaving partial changes opt in.
+    pub fn set_cancelable(&self, cancelable: bool) {
+        if cancelable {
+            self.cancel.store(false, Ordering::SeqCst);
+        }
+        self.lock().cancelable = cancelable;
+    }
+
+    pub fn cancelled(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::SeqCst) {
+            Err(CANCELLED_MESSAGE.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn request_cancel(&self) -> Result<(), String> {
+        let mut current = self.lock();
+        if current.state != "running" || !current.cancelable {
+            return Err("当前步骤无法取消，请等待完成。".into());
+        }
+        self.cancel.store(true, Ordering::SeqCst);
+        current.cancelable = false;
+        current.logs.push("已请求取消，正在停止下载…".into());
+        Ok(())
     }
 
     pub fn snapshot(&self) -> OperationSnapshot {
@@ -103,6 +147,7 @@ impl OperationState {
         if current.state == "running" {
             return Err("已有操作正在执行，请等待完成。".into());
         }
+        self.cancel.store(false, Ordering::SeqCst);
         let id = current.id.wrapping_add(1);
         *current = OperationSnapshot {
             id,
@@ -125,7 +170,8 @@ impl OperationState {
                 }
                 "uninstall_assistant" => assistant::uninstall(&worker),
                 "install_claude" => claude::install(&worker, false),
-                "update_claude" => claude::install(&worker, true),
+                "update_claude" => claude::install(&worker, true)
+                    .and_then(|outcome| reapply_after_update(outcome, &worker)),
                 "check_claude_update" => claude::check_update(&worker),
                 "apply_patch" => patch::apply(mode.as_deref().unwrap_or(""), &worker),
                 "restore_patch" => patch::restore(&worker),
@@ -144,6 +190,8 @@ impl OperationState {
         let mut current = self.lock();
         current.step = step.into();
         current.progress = None;
+        current.cancelable = false;
+        current.download_started = None;
         current.logs.push(step.into());
         trim_logs(&mut current.logs);
     }
@@ -156,18 +204,28 @@ impl OperationState {
         } else {
             "官方 x64 MSIX"
         };
+        let started = *current.download_started.get_or_insert_with(Instant::now);
+        let seconds = started.elapsed().as_secs_f64();
+        let speed = if seconds >= 1.0 && downloaded > 0 {
+            format!(" · {:.1} MiB/s", downloaded as f64 / mib / seconds)
+        } else {
+            String::new()
+        };
         current.step = match total.filter(|total| *total > 0) {
             Some(total) => {
                 current.progress = Some(((downloaded.saturating_mul(100) / total).min(100)) as u8);
                 format!(
-                    "下载{package}：{:.1} / {:.1} MiB",
+                    "下载{package}：{:.1} / {:.1} MiB{speed}",
                     downloaded as f64 / mib,
                     total as f64 / mib
                 )
             }
             None => {
                 current.progress = None;
-                format!("下载{package}：已下载 {:.1} MiB", downloaded as f64 / mib)
+                format!(
+                    "下载{package}：已下载 {:.1} MiB{speed}",
+                    downloaded as f64 / mib
+                )
             }
         };
     }
@@ -185,6 +243,7 @@ impl OperationState {
         if current.id != id {
             return;
         }
+        current.cancelable = false;
         match result {
             Ok(outcome) => {
                 current.state = "success".into();
@@ -205,6 +264,40 @@ impl OperationState {
         }
         trim_logs(&mut current.logs);
     }
+}
+
+// An official update replaces the localized files; restore the user's previous mode.
+fn reapply_after_update(
+    outcome: OperationOutcome,
+    operation: &OperationState,
+) -> Result<OperationOutcome, String> {
+    let status = match claude::status() {
+        Ok(status) => status,
+        Err(error) => {
+            operation.log(format!("更新后读取汉化状态失败：{error}"));
+            return Ok(outcome);
+        }
+    };
+    let Some(mode) = status.previous_mode.filter(|_| {
+        status.applied_mode.is_none()
+            && !status.external_localization
+            && !status.patch_recovery_required
+    }) else {
+        return Ok(outcome);
+    };
+    let enabled = assistant::load_config()
+        .map(|config| config.auto_reapply_patch)
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(OperationOutcome::done(format!(
+            "{}官方更新覆盖了之前的汉化，可在汉化页重新应用。",
+            outcome.message
+        )));
+    }
+    operation.step("官方更新已覆盖汉化，重新应用之前的模式");
+    patch::apply(&mode, operation)
+        .map(|applied| OperationOutcome::done(format!("{}{}", outcome.message, applied.message)))
+        .map_err(|error| format!("Claude Desktop 已更新，但重新应用汉化失败：{error}"))
 }
 
 fn trim_logs(logs: &mut Vec<String>) {
@@ -231,7 +324,7 @@ mod tests {
         let state = OperationState::new();
         let worker = state.clone();
         assert!(std::thread::spawn(move || {
-            let _guard = worker.0.lock().unwrap();
+            let _guard = worker.snapshot.lock().unwrap();
             panic!("simulate unexpected worker panic");
         })
         .join()
@@ -241,5 +334,21 @@ mod tests {
         let snapshot = state.snapshot();
         assert_eq!(snapshot.state, "error");
         assert_eq!(snapshot.message, "后台操作意外中断。");
+    }
+
+    #[test]
+    fn cancellation_is_limited_to_cancelable_steps() {
+        let state = OperationState::new();
+        state.lock().state = "running".into();
+        assert!(state.request_cancel().is_err());
+        assert!(state.cancelled().is_ok());
+        state.set_cancelable(true);
+        assert!(state.snapshot().cancelable);
+        state.request_cancel().unwrap();
+        assert_eq!(state.cancelled().unwrap_err(), CANCELLED_MESSAGE);
+        assert!(!state.snapshot().cancelable);
+        state.step("下一步");
+        state.set_cancelable(true);
+        assert!(state.cancelled().is_ok());
     }
 }

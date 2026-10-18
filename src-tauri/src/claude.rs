@@ -53,6 +53,7 @@ pub struct ClaudeStatus {
     pub backup_ready: bool,
     pub external_localization: bool,
     pub patch_recovery_required: bool,
+    pub previous_mode: Option<String>,
     pub message: String,
     pub update_available: Option<bool>,
     pub latest_version: Option<String>,
@@ -108,6 +109,7 @@ pub fn status() -> Result<ClaudeStatus, String> {
             backup_ready: false,
             external_localization: false,
             patch_recovery_required: false,
+            previous_mode: None,
             message: "未安装官方 Claude Desktop。".into(),
             update_available: None,
             latest_version: cached
@@ -128,6 +130,7 @@ pub fn status() -> Result<ClaudeStatus, String> {
         backup_ready: state.backup_ready,
         external_localization: state.external_localization,
         patch_recovery_required: state.recovery_required,
+        previous_mode: state.previous_mode,
         message: if state.recovery_required {
             patch::recovery_message(&package)?
         } else if state.external_localization {
@@ -477,6 +480,7 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
     };
     if !reuse {
         operation.step("下载官方 x64 MSIX");
+        operation.set_cancelable(true);
         download_msix(&metadata.url, &msix, operation)?;
     }
     operation.step("校验官方 MSIX");
@@ -623,6 +627,7 @@ fn save_msix_stream<R: Read>(
             .map_err(|error| format!("创建 MSIX 临时文件失败：{error}"))?;
         copy_download(source, &mut file, total, |done, total| {
             operation.download_progress(done, total);
+            operation.cancelled()
         })?;
         file.sync_all()
             .map_err(|error| format!("写入 MSIX 临时文件失败：{error}"))?;
@@ -640,11 +645,11 @@ fn copy_download<R: Read, W: Write>(
     source: &mut R,
     destination: &mut W,
     total: Option<u64>,
-    mut progress: impl FnMut(u64, Option<u64>),
+    mut progress: impl FnMut(u64, Option<u64>) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut downloaded = 0u64;
     let mut last_report = Instant::now();
-    progress(0, total);
+    progress(0, total)?;
     let mut buffer = [0u8; 128 * 1024];
     loop {
         let count = source.read(&mut buffer).map_err(|error| {
@@ -667,7 +672,7 @@ fn copy_download<R: Read, W: Write>(
             .map_err(|error| format!("写入官方 MSIX 失败：{error}"))?;
         downloaded += count as u64;
         if last_report.elapsed() >= Duration::from_millis(250) {
-            progress(downloaded, total);
+            progress(downloaded, total)?;
             last_report = Instant::now();
         }
     }
@@ -677,7 +682,7 @@ fn copy_download<R: Read, W: Write>(
             total.map_or("未知".into(), |value| value.to_string())
         ));
     }
-    progress(downloaded, total);
+    progress(downloaded, total)?;
     Ok(())
 }
 
@@ -772,22 +777,33 @@ $exists=Test-Path -LiteralPath $link
 $shortcut=$shell.CreateShortcut($link)
 if ($exists -and ($shortcut.TargetPath -ne $target -or $shortcut.Arguments -ne $args)) {{ throw '桌面已有同名快捷方式且目标不是官方 Claude Desktop。' }}
 # Keep official artwork outside its versioned WindowsApps directory.
+# App-list (targetsize) assets are full-bleed; Start tile logos carry ~50% padding.
 Add-Type -AssemblyName System.Drawing
-$source=[Drawing.Image]::FromFile({source})
+$assets={assets}
+$sourcePath=Join-Path $assets 'Square44x44Logo.targetsize-256.png'
+if (-not (Test-Path -LiteralPath $sourcePath)) {{ $sourcePath=Join-Path $assets 'Square150x150Logo.scale-200.png' }}
+$source=[Drawing.Image]::FromFile($sourcePath)
 $sizes=@(16,24,32,48,64,128,256)
 $frames=New-Object 'System.Collections.Generic.List[byte[]]'
 try {{
     foreach ($size in $sizes) {{
+        # Prefer the hand-tuned official frame for this exact size.
+        $exactPath=Join-Path $assets "Square44x44Logo.targetsize-$size.png"
+        $exact=$null
+        if (Test-Path -LiteralPath $exactPath) {{
+            $exact=[Drawing.Image]::FromFile($exactPath)
+            if ($exact.Width -ne $size -or $exact.Height -ne $size) {{ $exact.Dispose(); $exact=$null }}
+        }}
         $bitmap=New-Object Drawing.Bitmap($size,$size)
         $graphics=[Drawing.Graphics]::FromImage($bitmap)
         $png=New-Object IO.MemoryStream
         try {{
             $graphics.InterpolationMode=[Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
             $graphics.PixelOffsetMode=[Drawing.Drawing2D.PixelOffsetMode]::HighQuality
-            $graphics.DrawImage($source,0,0,$size,$size)
+            $graphics.DrawImage($(if ($exact) {{ $exact }} else {{ $source }}),0,0,$size,$size)
             $bitmap.Save($png,[Drawing.Imaging.ImageFormat]::Png)
             $frames.Add($png.ToArray())
-        }} finally {{ $png.Dispose(); $graphics.Dispose(); $bitmap.Dispose() }}
+        }} finally {{ $png.Dispose(); $graphics.Dispose(); $bitmap.Dispose(); if ($exact) {{ $exact.Dispose() }} }}
     }}
     $icon={icon}
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($icon)) | Out-Null
@@ -818,11 +834,7 @@ if ($exists) {{ 'UPDATED' }} else {{ 'CREATED' }}
 $link"#,
         desktop = ps_path(desktop),
         args = ps_quote(format!(r"shell:AppsFolder\{APP_ID}")),
-        source = ps_path(
-            &package
-                .root()
-                .join("assets/Square150x150Logo.scale-200.png")
-        ),
+        assets = ps_path(&package.root().join("assets")),
         icon = ps_path(icon),
     )
 }
@@ -832,13 +844,15 @@ pub fn create_shortcut(operation: &OperationState) -> Result<OperationOutcome, S
         .ok_or_else(|| "未安装官方 Claude Desktop，无法创建快捷方式。".to_string())?;
     operation.step("创建 Claude Desktop 桌面快捷方式");
     let desktop = util::powershell("[Environment]::GetFolderPath('Desktop')")?;
-    let icon = util::data_dir()?.join("icons/claude-desktop.ico");
+    // Renamed from claude-desktop.ico so Explorer's per-path icon cache picks up the full-bleed artwork.
+    let icon = util::data_dir()?.join("icons/claude-desktop-app.ico");
     let output = util::powershell(&desktop_shortcut_script(
         &package,
         Path::new(&desktop),
         &icon,
     ))?;
     operation.log(format!("Claude Desktop 快捷方式：{output}"));
+    let _ = fs::remove_file(util::data_dir()?.join("icons/claude-desktop.ico"));
     Ok(OperationOutcome::done(if output.starts_with("UPDATED") {
         "Claude Desktop 桌面快捷方式已更新。"
     } else {
@@ -858,8 +872,13 @@ mod tests {
             std::env::temp_dir().join(format!("claude-shortcut-icon-{}", std::process::id()));
         fs::create_dir_all(root.join("assets")).unwrap();
         fs::write(
-            root.join("assets/Square150x150Logo.scale-200.png"),
+            root.join("assets/Square44x44Logo.targetsize-256.png"),
             include_bytes!("../icons/icon.png"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("assets/Square44x44Logo.targetsize-32.png"),
+            include_bytes!("../icons/32x32.png"),
         )
         .unwrap();
         let package = ClaudePackage {
@@ -921,6 +940,7 @@ mod tests {
             update_available: Some(true),
             latest_version: Some("2.7032.0".into()),
             error: None,
+            release_notes: None,
         };
         for (installed, expected) in [
             ("2.7032.0.0", Some(false)),
