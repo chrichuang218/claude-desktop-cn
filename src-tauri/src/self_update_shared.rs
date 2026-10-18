@@ -5,6 +5,8 @@ const OWNER_REPO: &str = "chrichuang218/claude-desktop-cn";
 struct Release {
     tag_name: String,
     html_url: String,
+    #[serde(default)]
+    body: Option<String>,
     assets: Vec<Asset>,
 }
 
@@ -20,6 +22,7 @@ struct ReleaseInfo {
     asset_url: String,
     checksum_url: String,
     release_url: String,
+    notes: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +32,8 @@ pub struct CachedUpdate {
     pub update_available: Option<bool>,
     pub latest_version: Option<String>,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_notes: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,6 +104,34 @@ fn validate_release_assets(release: Release) -> Result<ReleaseInfo, String> {
         asset_url: executable.browser_download_url.clone(),
         checksum_url: checksum.browser_download_url.clone(),
         release_url: release.html_url,
+        notes: release.body.as_deref().and_then(summarize_notes),
+    })
+}
+
+// Keep the update dialog compact: drop Markdown markers and cap the summary.
+fn summarize_notes(body: &str) -> Option<String> {
+    let lines = body
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches('#')
+                .trim_start_matches(['-', '*'])
+                .trim()
+                .replace("**", "")
+                .replace('`', "")
+        })
+        .filter(|line| !line.is_empty())
+        .take(12)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let text = lines.join("
+");
+    Some(if text.chars().count() > 600 {
+        format!("{}…", text.chars().take(599).collect::<String>())
+    } else {
+        text
     })
 }
 
@@ -153,6 +186,7 @@ mod repository_tests {
         Release {
             tag_name: "v9.9.9".into(),
             html_url: format!("https://github.com/{OWNER_REPO}/releases/tag/v9.9.9"),
+            body: None,
             assets: names
                 .iter()
                 .map(|name| Asset {
@@ -187,6 +221,7 @@ mod repository_tests {
             let release = Release {
                 tag_name: "v1.0.0".into(),
                 html_url: format!("{base}/releases/tag/v1.0.0"),
+                body: None,
                 assets: [ASSET, CHECKSUM]
                     .into_iter()
                     .map(|name| Asset {
@@ -359,12 +394,14 @@ fn claude_check_cache(result: &Result<(bool, String), String>) -> CachedUpdate {
             update_available: Some(*available),
             latest_version: Some(version.clone()),
             error: None,
+            release_notes: None,
         },
         Err(error) => CachedUpdate {
             checked_at: now_string(),
             update_available: None,
             latest_version: None,
             error: Some(error.clone()),
+            release_notes: None,
         },
     }
 }
@@ -379,12 +416,14 @@ fn assistant_check_cache(result: &Result<Option<ReleaseInfo>, String>) -> Cached
             })),
             latest_version: release.as_ref().map(|info| info.version.clone()),
             error: None,
+            release_notes: release.as_ref().and_then(|info| info.notes.clone()),
         },
         Err(error) => CachedUpdate {
             checked_at: now_string(),
             update_available: None,
             latest_version: None,
             error: Some(error.clone()),
+            release_notes: None,
         },
     }
 }

@@ -1,8 +1,30 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Claude 中文助手",
+        "width": 736,
+        "height": 576,
+        "minWidth": 360,
+        "minHeight": 320,
+        "preventOverflow": true,
+        "decorations": true,
+        "backgroundColor": "#faf9f6",
+        "visible": false,
+        "resizable": true,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ]
+  },
   "bundle": {
     "active": true,
-    "targets": ["app"],
+    "targets": [
+      "app"
+    ],
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

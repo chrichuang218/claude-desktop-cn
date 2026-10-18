@@ -21,6 +21,12 @@ pub struct AssistantConfig {
     pub assistant_path: String,
     pub create_assistant_shortcut: bool,
     pub daily_update_check: bool,
+    #[serde(default = "default_true")]
+    pub auto_reapply_patch: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,6 +50,7 @@ pub struct AssistantStatus {
     pub latest_version: Option<String>,
     pub update_check_error: Option<String>,
     pub last_update_check: Option<String>,
+    pub release_notes: Option<String>,
     pub update_result: Option<String>,
     pub update_result_ok: Option<bool>,
     pub uninstall_result: Option<String>,
@@ -134,6 +141,7 @@ pub fn load_config() -> Result<AssistantConfig, String> {
             assistant_path: defaults()?.user,
             create_assistant_shortcut: true,
             daily_update_check: true,
+            auto_reapply_patch: true,
         });
     }
     let config: AssistantConfig = serde_json::from_slice(
@@ -276,6 +284,9 @@ pub fn status() -> Result<AssistantStatus, String> {
             .as_ref()
             .and_then(|value| value.latest_version.clone()),
         update_check_error: cached.as_ref().and_then(|value| value.error.clone()),
+        release_notes: cached
+            .as_ref()
+            .and_then(|value| value.release_notes.clone()),
         last_update_check: cached.map(|value| value.checked_at),
         update_result: result.as_ref().map(|value| value.message.clone()),
         update_result_ok: result.map(|value| value.ok),

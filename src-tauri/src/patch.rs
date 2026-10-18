@@ -171,6 +171,8 @@ pub struct PatchState {
     pub backup_ready: bool,
     pub external_localization: bool,
     pub recovery_required: bool,
+    /// Mode recorded for an older Claude version that an official update replaced.
+    pub previous_mode: Option<String>,
 }
 
 fn manifest_path() -> Result<PathBuf, String> {
@@ -239,6 +241,7 @@ pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
             backup_ready: false,
             external_localization: external_assets && !pending_for_current,
             recovery_required,
+            previous_mode: None,
         });
     };
     if manifest.package_full_name != package.package_full_name
@@ -250,6 +253,7 @@ pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
             backup_ready: false,
             external_localization: external_assets && !pending_for_current,
             recovery_required,
+            previous_mode: manifest.applied_mode,
         });
     }
     let valid = validate_backup(&manifest, package).is_ok();
@@ -268,6 +272,7 @@ pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
         backup_ready: valid,
         external_localization: external_assets && !valid && !pending_for_current,
         recovery_required,
+        previous_mode: None,
     })
 }
 

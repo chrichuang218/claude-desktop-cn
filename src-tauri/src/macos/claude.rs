@@ -45,6 +45,7 @@ pub struct ClaudeStatus {
     pub backup_ready: bool,
     pub external_localization: bool,
     pub patch_recovery_required: bool,
+    pub previous_mode: Option<String>,
     pub message: String,
     pub update_available: Option<bool>,
     pub latest_version: Option<String>,
@@ -214,6 +215,7 @@ pub fn status() -> Result<ClaudeStatus, String> {
         backup_ready: state.as_ref().is_some_and(|state| state.backup_ready),
         external_localization: external,
         patch_recovery_required: recovery,
+        previous_mode: state.as_ref().and_then(|state| state.previous_mode.clone()),
         message: if recovery {
             "上次汉化未完成，需人工核查本次备份与文件。"
         } else if external {
@@ -587,6 +589,7 @@ fn download_zip(url: &str, destination: &Path, operation: &OperationState) -> Re
             if count == 0 {
                 break;
             }
+            operation.cancelled()?;
             file.write_all(&buffer[..count])
                 .map_err(|e| e.to_string())?;
             downloaded += count as u64;
@@ -696,6 +699,7 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
             Some(app) => app,
             None => {
                 operation.step("下载官方 macOS 安装包");
+                operation.set_cancelable(true);
                 download_zip(&metadata.url, &zip, operation)?;
                 operation.step("校验官方应用签名、架构与版本");
                 extract_official(&zip, &work, &metadata.version)?

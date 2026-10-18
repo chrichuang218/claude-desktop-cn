@@ -132,6 +132,28 @@ fn start_operation(
 }
 
 #[tauri::command]
+fn cancel_operation(state: tauri::State<'_, OperationState>) -> Result<(), String> {
+    state.request_cancel()
+}
+
+// Opens only the assistant's own data directory, where recovery records and logs live.
+#[tauri::command]
+fn open_data_dir() -> Result<(), String> {
+    let path = util::data_dir()?;
+    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "explorer.exe"
+    };
+    std::process::Command::new(program)
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开 {}：{error}", path.display()))
+}
+
+#[tauri::command]
 fn open_claude() -> Result<(), String> {
     claude::launch()
 }
@@ -172,6 +194,8 @@ pub fn run() {
             save_config,
             get_operation_snapshot,
             start_operation,
+            cancel_operation,
+            open_data_dir,
             open_claude,
             choose_assistant_install_path,
         ])

@@ -15,6 +15,12 @@ pub struct AssistantConfig {
     pub assistant_path: String,
     pub create_assistant_shortcut: bool,
     pub daily_update_check: bool,
+    #[serde(default = "default_true")]
+    pub auto_reapply_patch: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -38,6 +44,7 @@ pub struct AssistantStatus {
     pub latest_version: Option<String>,
     pub update_check_error: Option<String>,
     pub last_update_check: Option<String>,
+    pub release_notes: Option<String>,
     pub update_result: Option<String>,
     pub update_result_ok: Option<bool>,
     pub uninstall_result: Option<String>,
@@ -123,6 +130,7 @@ pub fn load_config() -> Result<AssistantConfig, String> {
             assistant_path: defaults()?.user,
             create_assistant_shortcut: true,
             daily_update_check: true,
+            auto_reapply_patch: true,
         });
     }
     let raw = fs::read_to_string(&path).map_err(|error| format!("读取助手设置失败：{error}"))?;
@@ -221,6 +229,9 @@ pub fn status() -> Result<AssistantStatus, String> {
             .as_ref()
             .and_then(|value| value.latest_version.clone()),
         update_check_error: cached.as_ref().and_then(|value| value.error.clone()),
+        release_notes: cached
+            .as_ref()
+            .and_then(|value| value.release_notes.clone()),
         last_update_check: cached.map(|value| value.checked_at),
         update_result: update_result.as_ref().map(|value| value.message.clone()),
         update_result_ok: update_result.map(|value| value.ok),
@@ -563,6 +574,7 @@ mod tests {
                 assistant_path: destination.display().to_string(),
                 create_assistant_shortcut: false,
                 daily_update_check: false,
+                auto_reapply_patch: true,
             };
             save_config(config.clone()).unwrap();
             let operation = OperationState::new();
@@ -630,6 +642,7 @@ mod tests {
             assistant_path: r"C:\".into(),
             create_assistant_shortcut: true,
             daily_update_check: true,
+            auto_reapply_patch: true,
         };
         assert!(validate_config(&config).is_err());
         config.assistant_path = r"temp\assistant".into();
@@ -683,6 +696,7 @@ mod tests {
                     assistant_path: destination.display().to_string(),
                     create_assistant_shortcut: true,
                     daily_update_check: false,
+                    auto_reapply_patch: true,
                 };
                 save_config(config).unwrap();
                 let loaded = load_config().unwrap();

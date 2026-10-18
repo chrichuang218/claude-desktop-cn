@@ -51,7 +51,8 @@ fn powershell_command() -> Command {
 
 pub fn powershell(script: &str) -> Result<String, String> {
     let script = format!(
-        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; {script}"
+        // Windows PowerShell 5.1 may default to SSL3/TLS 1.0, which official endpoints reject.
+        "$ErrorActionPreference='Stop'; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; try {{ [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 12288 }} catch {{ }}; {script}"
     );
     let output = powershell_command()
         .args(["-Command", &script])
