@@ -14,9 +14,18 @@ use std::os::windows::process::CommandExt;
 pub const PRODUCT_DIR: &str = "ClaudeWindowsCN";
 pub const EXE_NAME: &str = "claude-windows-cn.exe";
 const HELPER_FLAG: &str = "--run-assistant-helper";
+const PORTABLE_DATA_DIR: &str = "data";
+const PORTABLE_MIGRATION_MARKER: &str = ".migrated-from-local-app-data";
 
 pub fn data_dir() -> Result<PathBuf, String> {
-    Ok(local_app_data()?.join(PRODUCT_DIR))
+    let legacy = local_app_data()?.join(PRODUCT_DIR);
+    let Some(root) = portable_install_root()? else {
+        return Ok(legacy);
+    };
+    let portable = root.join(PORTABLE_DATA_DIR);
+    fs::create_dir_all(&portable).map_err(|error| format!("创建便携版数据目录失败：{error}"))?;
+    migrate_legacy_data(&legacy, &portable)?;
+    Ok(portable)
 }
 
 pub fn local_app_data() -> Result<PathBuf, String> {
@@ -24,6 +33,67 @@ pub fn local_app_data() -> Result<PathBuf, String> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| "无法读取当前用户 LocalAppData 目录。".to_string())
+}
+
+fn portable_install_root() -> Result<Option<PathBuf>, String> {
+    let exe = env::current_exe().map_err(|error| error.to_string())?;
+    let Some(root) = exe.parent() else {
+        return Ok(None);
+    };
+    Ok(is_portable_install(root).then(|| root.to_path_buf()))
+}
+
+fn is_portable_install(root: &Path) -> bool {
+    let manifest = root.join("install.json");
+    let Ok(raw) = fs::read_to_string(manifest) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    value.get("product").and_then(|item| item.as_str()) == Some("claude-windows-cn")
+        && value.get("mode").and_then(|item| item.as_str()) == Some("portable")
+}
+
+fn migrate_legacy_data(legacy: &Path, portable: &Path) -> Result<(), String> {
+    let marker = portable.join(PORTABLE_MIGRATION_MARKER);
+    if marker.exists() || !legacy.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(legacy).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        copy_missing(&entry.path(), &portable.join(entry.file_name()))?;
+    }
+    fs::write(&marker, b"1\n").map_err(|error| format!("写入迁移标记失败：{error}"))
+}
+
+fn copy_missing(source: &Path, target: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if target.exists() {
+        if metadata.is_dir() && target.is_dir() {
+            for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                copy_missing(&entry.path(), &target.join(entry.file_name()))?;
+            }
+        }
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(target).map_err(|error| error.to_string())?;
+        for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            copy_missing(&entry.path(), &target.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        fs::copy(source, target).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn ps_quote(value: impl AsRef<str>) -> String {
@@ -252,6 +322,76 @@ fn run_script_to_log(script: &Path, log_path: &Path) -> Result<String, String> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_manifest_selects_root_data_storage() {
+        let root = env::temp_dir().join(format!(
+            "claude-windows-cn-portable-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let manifest = root.join("install.json");
+        fs::write(
+            &manifest,
+            r#"{"product":"claude-windows-cn","mode":"portable"}"#,
+        )
+        .unwrap();
+        assert!(is_portable_install(&root));
+        fs::write(
+            &manifest,
+            r#"{"product":"claude-windows-cn","mode":"user"}"#,
+        )
+        .unwrap();
+        assert!(!is_portable_install(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn portable_data_migration_copies_missing_legacy_data_once() {
+        let root = env::temp_dir().join(format!(
+            "claude-windows-cn-portable-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let legacy = root.join("legacy");
+        let portable = root.join("data");
+        fs::create_dir_all(legacy.join("patch-engine/cache")).unwrap();
+        fs::create_dir_all(&portable).unwrap();
+        fs::write(legacy.join("config.json"), "legacy-config").unwrap();
+        fs::write(
+            legacy.join("patch-engine/cache/engine.zip"),
+            "cached-engine",
+        )
+        .unwrap();
+        fs::write(portable.join("config.json"), "portable-config").unwrap();
+
+        migrate_legacy_data(&legacy, &portable).unwrap();
+        assert_eq!(
+            fs::read_to_string(portable.join("config.json")).unwrap(),
+            "portable-config"
+        );
+        assert_eq!(
+            fs::read_to_string(portable.join("patch-engine/cache/engine.zip")).unwrap(),
+            "cached-engine"
+        );
+        assert!(portable.join(PORTABLE_MIGRATION_MARKER).is_file());
+        assert!(legacy.join("config.json").is_file());
+
+        fs::write(legacy.join("config.json"), "new-legacy-config").unwrap();
+        migrate_legacy_data(&legacy, &portable).unwrap();
+        assert_eq!(
+            fs::read_to_string(portable.join("config.json")).unwrap(),
+            "portable-config"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn windows_powershell_launchers_load_native_security_module() {

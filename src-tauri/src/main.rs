@@ -6,7 +6,7 @@ struct SingleInstanceGuard(windows_sys::Win32::Foundation::HANDLE);
 #[cfg(target_os = "windows")]
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
-        if self.0 != std::ptr::null_mut() {
+        if !self.0.is_null() {
             unsafe {
                 windows_sys::Win32::Foundation::CloseHandle(self.0);
             }
@@ -36,7 +36,7 @@ fn acquire_single_instance_or_exit() -> Option<SingleInstanceGuard> {
             1,
             name.as_ptr(),
         );
-        if handle == std::ptr::null_mut() {
+        if handle.is_null() {
             return None;
         }
         if windows_sys::Win32::Foundation::GetLastError()

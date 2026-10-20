@@ -614,14 +614,20 @@ mod tests {
                 status().unwrap().install_path,
                 destination.display().to_string()
             );
+            let data = destination.join("data");
+            assert!(data.join("config.json").is_file());
+            assert!(data.join("installed.json").is_file());
+            let legacy =
+                PathBuf::from(env::var_os("LOCALAPPDATA").unwrap()).join(util::PRODUCT_DIR);
+            assert!(legacy.join("config.json").is_file());
             let entries = fs::read_dir(destination)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
             assert_eq!(
                 entries.len(),
-                2,
-                "Only the original EXE and install.json should exist"
+                3,
+                "Portable root should contain only the EXE, install.json and data"
             );
             return;
         }

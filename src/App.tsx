@@ -600,7 +600,7 @@ function App() {
               <select id="ca-install-mode" className="ca-install-select" value={config.assistantInstallMode} onChange={(event) => changeInstallMode(event.target.value as InstallMode)} disabled={!assistant || busy}>
                 <option value="portable">便携方式</option><option value="user">用户安装（推荐）</option><option value="system">系统安装</option>
               </select>
-              <p className="ca-install-hint">{config.assistantInstallMode === 'portable' ? '默认在当前目录使用，不复制程序；选择其他目录时会保留原始文件。' : platform === 'macos' ? `将 Claude 中文助手.app 复制到所选目录${config.assistantInstallMode === 'system' ? '，系统安装可能需要管理员授权' : ''}；原始下载文件会保留。` : '程序将复制到安装位置；安装完成并退出后，可删除原始下载文件。'}</p>
+              <p className="ca-install-hint">{config.assistantInstallMode === 'portable' ? '默认在当前目录使用，不复制程序；数据保存在当前目录的 data 文件夹。' : platform === 'macos' ? `将 Claude 中文助手.app 复制到所选目录${config.assistantInstallMode === 'system' ? '，系统安装可能需要管理员授权' : ''}；原始下载文件会保留。` : '程序将复制到安装位置；安装完成并退出后，可删除原始下载文件。'}</p>
               <div className="ca-install-label ca-install-path-label"><label htmlFor="ca-assistant-path">安装位置</label></div>
               <div className="ca-path-row">
                 <input id="ca-assistant-path" value={config.assistantPath} aria-label="助手安装位置" onChange={(event) => setConfig((current) => ({ ...current, assistantPath: event.target.value }))} disabled={!assistant || busy} />

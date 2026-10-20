@@ -1,5 +1,15 @@
 # 更新日志
 
+## 未发布
+
+### 改进
+
+- Windows 便携版将配置、日志和下载缓存保存在程序目录下的 `data` 文件夹；首次从旧版升级时合并原 `%LOCALAPPDATA%\ClaudeWindowsCN` 数据，并保留旧目录供核验。
+
+### 修复
+
+- 适配最新上游汉化引擎：使用 `Remove-LegacyFridaResident`，并移除上游已不接受的 `PatchMode` 参数。
+
 ## 0.2.4 - 2026-10-19
 
 ### 修复
