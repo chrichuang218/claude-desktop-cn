@@ -472,27 +472,17 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     let result = (|| {
         if let Some(mut manifest) = existing {
             operation.step("按当前版本备份恢复原始文件");
-            run_engine(
-                &engine,
-                &script,
-                &package,
-                "uninstall",
-                "safe",
-                None,
-                operation,
-            )?;
+            run_engine(&engine, &script, &package, "uninstall", None, operation)?;
             verify_restored(&manifest, &package)?;
             manifest.applied_mode = None;
             save_manifest(&manifest)?;
         }
         operation.step("应用简体中文资源");
-        let upstream_mode = if mode == "safe" { "safe" } else { "official" };
         run_engine(
             &engine,
             &script,
             &package,
             "install",
-            upstream_mode,
             pending.as_ref(),
             operation,
         )?;
@@ -596,15 +586,7 @@ fn rollback_first_apply(
     };
     validate_backup(&manifest, package)?;
     operation.step("汉化失败，恢复本次备份");
-    run_engine(
-        engine,
-        script,
-        package,
-        "uninstall",
-        "safe",
-        None,
-        operation,
-    )?;
+    run_engine(engine, script, package, "uninstall", None, operation)?;
     verify_restored(&manifest, package)?;
     manifest.applied_mode = None;
     save_manifest(&manifest)?;
@@ -622,15 +604,7 @@ pub fn restore(operation: &OperationState) -> Result<OperationOutcome, String> {
     let engine = fetch_engine(operation)?;
     let script = adapt_engine(&engine, &package)?;
     operation.step("恢复当前 Claude 版本的原始文件");
-    run_engine(
-        &engine,
-        &script,
-        &package,
-        "uninstall",
-        "safe",
-        None,
-        operation,
-    )?;
+    run_engine(&engine, &script, &package, "uninstall", None, operation)?;
     verify_restored(&manifest, &package)?;
     manifest.applied_mode = None;
     manifest.engine_sha256 = engine.sha256;
@@ -640,7 +614,7 @@ pub fn restore(operation: &OperationState) -> Result<OperationOutcome, String> {
 
 fn verify_restored(manifest: &BackupManifest, package: &ClaudePackage) -> Result<(), String> {
     for file in &manifest.files {
-        let target = backup_target(&package, &file.relative_path)?;
+        let target = backup_target(package, &file.relative_path)?;
         if !target.is_file() || util::sha256(&target)? != file.sha256 {
             return Err(format!("恢复后文件校验失败：{}", file.relative_path));
         }
@@ -774,7 +748,7 @@ fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, Str
     );
     content = replace_function(&content, "Test-ClaudeDesktopProcessPath", &process)?;
     for name in [
-        "Disable-FridaResidentForDiskInstall",
+        "Remove-LegacyFridaResident",
         "Remove-LegacyAppxForkArtifacts",
         "Repair-ClaudeDesktopShortcut",
         "Start-CoworkVMService",
@@ -852,7 +826,6 @@ fn run_engine(
     script: &Path,
     package: &ClaudePackage,
     action: &str,
-    mode: &str,
     pending: Option<&PendingPatch>,
     operation: &OperationState,
 ) -> Result<String, String> {
@@ -863,7 +836,6 @@ fn run_engine(
         script,
         package,
         action,
-        mode,
         pending.map(|p| (p, record_path.as_path())),
     )?;
     util::write_script(&wrapper, &script_content)?;
@@ -874,7 +846,6 @@ fn engine_wrapper(
     script: &Path,
     package: &ClaudePackage,
     action: &str,
-    mode: &str,
     pending: Option<(&PendingPatch, &Path)>,
 ) -> Result<String, String> {
     let caller_sid =
@@ -917,7 +888,7 @@ fn engine_wrapper(
         $failure=$null
         try {{
             {record_pending}
-            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} {action} 'zh-CN' -PatchMode {mode} -OriginalUserSid $sid -OriginalUserProfile {profile} -OriginalAppData {roaming} -OriginalLocalAppData {local}
+            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} {action} 'zh-CN' -OriginalUserSid $sid -OriginalUserProfile {profile} -OriginalAppData {roaming} -OriginalLocalAppData {local}
             if ($LASTEXITCODE -ne 0) {{ throw "汉化脚本退出码 $LASTEXITCODE" }}
         }} catch {{ $failure=$_ }} finally {{
             if ($restoreCowork) {{
@@ -939,7 +910,6 @@ fn engine_wrapper(
         full = ps_quote(&package.package_full_name),
         script = ps_path(script),
         action = ps_quote(action),
-        mode = ps_quote(mode),
         profile = ps_quote(env::var("USERPROFILE").map_err(|_| "无法读取当前用户配置目录。")?),
         roaming = ps_quote(env::var("APPDATA").map_err(|_| "无法读取当前用户 AppData。")?),
         local = ps_quote(env::var("LOCALAPPDATA").map_err(|_| "无法读取当前用户 LocalAppData。")?),
@@ -975,7 +945,6 @@ mod tests {
             &root.join("unused.ps1"),
             &package,
             "install",
-            "safe",
             Some((&pending, &record)),
         )
         .unwrap();
@@ -1135,7 +1104,7 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
                 "Get-ClaudeConfigPaths",
                 "Test-ClaudeDesktopProcessPath",
                 "Stop-ClaudeProcesses",
-                "Disable-FridaResidentForDiskInstall",
+                "Remove-LegacyFridaResident",
                 "Remove-LegacyAppxForkArtifacts",
                 "Repair-ClaudeDesktopShortcut",
                 "Start-CoworkVMService",
@@ -1264,9 +1233,9 @@ function Remove-ItemProperty {{ throw 'Forbidden registry mutation in isolated t
 function Add-AppxPackage {{ throw 'Forbidden registration in isolated test' }}
 function Remove-AppxPackage {{ throw 'Forbidden registration in isolated test' }}
 function taskkill {{ throw 'Forbidden process kill in isolated test' }}
-& {script} {action} 'zh-CN' -PatchMode {mode}
+& {script} {action} 'zh-CN'
 exit $LASTEXITCODE
-"#, full=ps_quote(&package.package_full_name), target=ps_path(&package_root), script=ps_path(&script), action=ps_quote(action), mode=ps_quote(mode))).unwrap();
+"#, full=ps_quote(&package.package_full_name), target=ps_path(&package_root), script=ps_path(&script), action=ps_quote(action))).unwrap();
             let result = util::run_script(&wrapper);
             fs::write(
                 root.join(format!("{index}-{action}-{mode}.log")),
