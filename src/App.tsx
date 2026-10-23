@@ -555,7 +555,7 @@ function App() {
     : operation?.step.trim() === title ? '' : operation?.step.trim() ?? ''
   const claudeChecked = checkedAgo(claude?.lastUpdateCheck)
   const assistantChecked = checkedAgo(assistant?.lastUpdateCheck)
-  const staleBanner = staleMode ? <div className="ca-banner" role="status"><div><h3>汉化已被官方更新覆盖</h3><p>Claude 更新后可重新应用 本地界面汉化。</p></div><button type="button" className="ca-button ca-primary" onClick={applyPatch} disabled={patchDisabled}><Languages aria-hidden="true" />重新应用</button></div> : null
+  const staleBanner = staleMode ? <div className="ca-banner" role="status"><div><h3>汉化已被官方更新覆盖</h3><p>Claude 更新后可重新应用本地界面汉化。</p></div><button type="button" className="ca-button ca-primary" onClick={applyPatch} disabled={patchDisabled}><Languages aria-hidden="true" />重新应用</button></div> : null
   const noticeBanner = notice ? <div className="ca-notice" role="status"><Check aria-hidden="true" /><p>{notice}</p><button type="button" className="ca-icon-button ca-notice-close" aria-label="关闭提示" onClick={() => setNotice('')}><X aria-hidden="true" /></button></div> : null
 
   return (
@@ -573,11 +573,12 @@ function App() {
         <div className="ca-layout" inert={confirm !== null || errorOpen}>
           <aside className="ca-sidebar">
             <div className="ca-brand"><img src="/claude-icon.svg" alt="" /><span>Claude 中文助手</span></div>
-            <nav className="ca-nav" aria-label="主导航">
-              <button type="button" onClick={() => navigate('overview')} aria-current={activePage === 'overview' ? 'page' : undefined} disabled={busy || !assistant?.installed || page === 'startup' || Boolean(loadError)}><LayoutDashboard aria-hidden="true" /><span>概览</span>{claude?.installed && claude.updateAvailable ? <i className="ca-dot" aria-label="有更新" /> : null}</button>
-              <button type="button" onClick={() => navigate('localize')} aria-current={activePage === 'localize' ? 'page' : undefined} disabled={busy || !assistant?.installed || page === 'startup' || Boolean(loadError)}><Languages aria-hidden="true" /><span>汉化</span>{staleMode || claude?.patchRecoveryRequired ? <i className="ca-dot" aria-label="需要处理" /> : null}</button>
-              <button type="button" onClick={() => navigate('settings')} aria-current={activePage === 'settings' ? 'page' : undefined} disabled={busy || !assistant?.installed || page === 'startup' || Boolean(loadError)}><Settings2 aria-hidden="true" /><span>设置</span>{assistantUpdate?.available ? <i className="ca-dot" aria-label="助手有新版本" /> : null}</button>
-            </nav>
+            {/* Tabs only make sense once the assistant is installed; hide them instead of showing three disabled ones. */}
+            {assistant?.installed && page !== 'startup' ? <nav className="ca-nav" aria-label="主导航">
+              <button type="button" onClick={() => navigate('overview')} aria-current={activePage === 'overview' ? 'page' : undefined} disabled={busy || Boolean(loadError)}><LayoutDashboard aria-hidden="true" /><span>概览</span>{claude?.installed && claude.updateAvailable ? <i className="ca-dot" role="img" aria-label="有更新" /> : null}</button>
+              <button type="button" onClick={() => navigate('localize')} aria-current={activePage === 'localize' ? 'page' : undefined} disabled={busy || Boolean(loadError)}><Languages aria-hidden="true" /><span>汉化</span>{staleMode || claude?.patchRecoveryRequired ? <i className="ca-dot" role="img" aria-label="需要处理" /> : null}</button>
+              <button type="button" onClick={() => navigate('settings')} aria-current={activePage === 'settings' ? 'page' : undefined} disabled={busy || Boolean(loadError)}><Settings2 aria-hidden="true" /><span>设置</span>{assistantUpdate?.available ? <i className="ca-dot" role="img" aria-label="助手有新版本" /> : null}</button>
+            </nav> : null}
           </aside>
           <main className="ca-main" data-page={page}>
             {page !== 'overview' ? <header className="ca-heading">
@@ -616,8 +617,8 @@ function App() {
               {claude?.updateAvailable && claude.installed ? <div className="ca-banner"><div><h3>Claude 有新版本</h3><p>{claude.version || '当前版本'} → {claude.latestVersion}{claude.appliedMode && config.autoReapplyPatch ? '；更新后自动重新应用汉化' : ''}</p></div><button type="button" className="ca-button ca-primary" onClick={() => confirmAction('更新 Claude？', `安装过程中会关闭 Claude，请先保存正在进行的工作。${claude.appliedMode ? config.autoReapplyPatch ? `更新完成后会应用本地界面汉化${platform === 'windows' ? '，可能请求管理员授权' : ''}。` : '官方更新会覆盖当前汉化，之后可在汉化页重新应用。' : ''}`, 'update_claude')} disabled={busy}><Download aria-hidden="true" />立即更新</button></div> : null}
               {staleBanner}
               <div className="ca-status-card">
-                <div className="ca-row"><span className="ca-row-icon"><Download aria-hidden="true" /></span><div><h3>应用更新</h3><p>{claude?.updateCheckError || (claude?.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</p></div><button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy || !claude?.installed}><RefreshCw aria-hidden="true" />检查更新</button></div>
-                <div className="ca-row"><span className="ca-row-icon"><Languages aria-hidden="true" /></span><div><h3>中文界面</h3><p data-warning={Boolean(claude?.patchRecoveryRequired || staleMode)}>{localizeCopy}</p></div><button type="button" className="ca-text-button" onClick={() => navigate('localize')} disabled={busy || !claude?.installed}>前往汉化<ArrowRight aria-hidden="true" /></button></div>
+                <div className="ca-row"><span className="ca-row-icon"><Download aria-hidden="true" /></span><div><h3>应用更新</h3>{claude?.installed ? <p>{claude.updateCheckError || (claude.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</p> : <p>安装 Claude 后可检查更新</p>}</div>{claude?.installed ? <button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy}><RefreshCw aria-hidden="true" />检查更新</button> : null}</div>
+                <div className="ca-row"><span className="ca-row-icon"><Languages aria-hidden="true" /></span><div><h3>中文界面</h3><p data-warning={Boolean(claude?.patchRecoveryRequired || staleMode)}>{localizeCopy}</p></div>{claude?.installed ? <button type="button" className="ca-text-button" onClick={() => navigate('localize')} disabled={busy}>前往汉化<ArrowRight aria-hidden="true" /></button> : null}</div>
               </div>
             </section> : null}
 
