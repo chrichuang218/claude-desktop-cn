@@ -437,8 +437,8 @@ fn fetch_engine(operation: &OperationState) -> Result<Engine, String> {
 }
 
 pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome, String> {
-    if !matches!(mode, "safe" | "full") {
-        return Err("汉化模式无效。".into());
+    if mode != "safe" {
+        return Err("仅支持 Cowork 兼容汉化。".into());
     }
     let package = claude::query_package()?.ok_or("未安装官方 Claude Desktop。")?;
     if read_pending()?.is_some() {
@@ -472,27 +472,17 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     let result = (|| {
         if let Some(mut manifest) = existing {
             operation.step("按当前版本备份恢复原始文件");
-            run_engine(
-                &engine,
-                &script,
-                &package,
-                "uninstall",
-                "safe",
-                None,
-                operation,
-            )?;
+            run_engine(&engine, &script, &package, "uninstall", None, operation)?;
             verify_restored(&manifest, &package)?;
             manifest.applied_mode = None;
             save_manifest(&manifest)?;
         }
         operation.step("应用简体中文资源");
-        let upstream_mode = if mode == "safe" { "safe" } else { "official" };
         run_engine(
             &engine,
             &script,
             &package,
             "install",
-            upstream_mode,
             pending.as_ref(),
             operation,
         )?;
@@ -596,15 +586,7 @@ fn rollback_first_apply(
     };
     validate_backup(&manifest, package)?;
     operation.step("汉化失败，恢复本次备份");
-    run_engine(
-        engine,
-        script,
-        package,
-        "uninstall",
-        "safe",
-        None,
-        operation,
-    )?;
+    run_engine(engine, script, package, "uninstall", None, operation)?;
     verify_restored(&manifest, package)?;
     manifest.applied_mode = None;
     save_manifest(&manifest)?;
@@ -622,15 +604,7 @@ pub fn restore(operation: &OperationState) -> Result<OperationOutcome, String> {
     let engine = fetch_engine(operation)?;
     let script = adapt_engine(&engine, &package)?;
     operation.step("恢复当前 Claude 版本的原始文件");
-    run_engine(
-        &engine,
-        &script,
-        &package,
-        "uninstall",
-        "safe",
-        None,
-        operation,
-    )?;
+    run_engine(&engine, &script, &package, "uninstall", None, operation)?;
     verify_restored(&manifest, &package)?;
     manifest.applied_mode = None;
     manifest.engine_sha256 = engine.sha256;
@@ -773,8 +747,16 @@ fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, Str
         prefix = ps_quote(format!("{}\\app\\", package.install_location))
     );
     content = replace_function(&content, "Test-ClaudeDesktopProcessPath", &process)?;
+    // New engines removed Frida resident mode entirely; older engines must still disable it.
+    let legacy_frida = "Disable-FridaResidentForDiskInstall";
+    if content.contains(legacy_frida) {
+        content = replace_function(
+            &content,
+            legacy_frida,
+            &format!("function {legacy_frida} {{ }}"),
+        )?;
+    }
     for name in [
-        "Disable-FridaResidentForDiskInstall",
         "Remove-LegacyAppxForkArtifacts",
         "Repair-ClaudeDesktopShortcut",
         "Start-CoworkVMService",
@@ -852,7 +834,6 @@ fn run_engine(
     script: &Path,
     package: &ClaudePackage,
     action: &str,
-    mode: &str,
     pending: Option<&PendingPatch>,
     operation: &OperationState,
 ) -> Result<String, String> {
@@ -863,20 +844,32 @@ fn run_engine(
         script,
         package,
         action,
-        mode,
         pending.map(|p| (p, record_path.as_path())),
     )?;
     util::write_script(&wrapper, &script_content)?;
     util::run_elevated_script_with_logs(&wrapper, work, |chunk| operation.log(chunk))
 }
 
+fn engine_mode_argument(script: &Path) -> Result<String, String> {
+    // Read declared parameters without executing the engine or touching Claude.
+    let supports_mode = util::powershell(&format!(
+        "(Get-Command -Name {} -CommandType ExternalScript -ErrorAction Stop).Parameters.ContainsKey('PatchMode')",
+        ps_path(script)
+    ))?;
+    match supports_mode.as_str() {
+        "True" => Ok("-PatchMode 'safe'".into()),
+        "False" => Ok(String::new()),
+        _ => Err("无法确认最新汉化引擎支持的模式。".into()),
+    }
+}
+
 fn engine_wrapper(
     script: &Path,
     package: &ClaudePackage,
     action: &str,
-    mode: &str,
     pending: Option<(&PendingPatch, &Path)>,
 ) -> Result<String, String> {
+    let mode_argument = engine_mode_argument(script)?;
     let caller_sid =
         util::powershell("[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value")?;
     if caller_sid.is_empty() {
@@ -917,7 +910,7 @@ fn engine_wrapper(
         $failure=$null
         try {{
             {record_pending}
-            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} {action} 'zh-CN' -PatchMode {mode} -OriginalUserSid $sid -OriginalUserProfile {profile} -OriginalAppData {roaming} -OriginalLocalAppData {local}
+            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} {action} 'zh-CN' {mode_argument} -OriginalUserSid $sid -OriginalUserProfile {profile} -OriginalAppData {roaming} -OriginalLocalAppData {local}
             if ($LASTEXITCODE -ne 0) {{ throw "汉化脚本退出码 $LASTEXITCODE" }}
         }} catch {{ $failure=$_ }} finally {{
             if ($restoreCowork) {{
@@ -939,7 +932,6 @@ fn engine_wrapper(
         full = ps_quote(&package.package_full_name),
         script = ps_path(script),
         action = ps_quote(action),
-        mode = ps_quote(mode),
         profile = ps_quote(env::var("USERPROFILE").map_err(|_| "无法读取当前用户配置目录。")?),
         roaming = ps_quote(env::var("APPDATA").map_err(|_| "无法读取当前用户 AppData。")?),
         local = ps_quote(env::var("LOCALAPPDATA").map_err(|_| "无法读取当前用户 LocalAppData。")?),
@@ -950,6 +942,33 @@ fn engine_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_arguments_bind_for_current_and_legacy_parameters() {
+        let root = env::temp_dir().join(format!("engine-arguments-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let script = root.join("engine.ps1");
+        for legacy in [false, true] {
+            let extra = if legacy {
+                ", [ValidateSet('safe','official')][string]$PatchMode"
+            } else {
+                ""
+            };
+            util::write_script(&script, &format!(
+                "param([string]$Action, [string]$Language, [string]$OriginalUserSid{extra})\nif ($args.Count) {{ throw 'Unexpected arguments' }}\nWrite-Output \"$Action/$Language/$OriginalUserSid\""
+            )).unwrap();
+            let argument = engine_mode_argument(&script).unwrap();
+            assert_eq!(argument.contains("-PatchMode"), legacy);
+            let output = util::powershell(&format!(
+                "& {} install 'zh-CN' {argument} -OriginalUserSid 'caller'",
+                ps_path(&script)
+            ))
+            .unwrap();
+            assert_eq!(output, "install/zh-CN/caller");
+            assert!(!argument.contains("official"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn pending_record_starts_only_after_preflight_and_survives_engine_failure() {
@@ -970,12 +989,12 @@ mod tests {
         };
         fs::create_dir_all(package.exe().parent().unwrap()).unwrap();
         fs::write(package.exe(), "fixture").unwrap();
+        fs::write(root.join("unused.ps1"), "param([string]$PatchMode)").unwrap();
         let record = root.join("pending.json");
         let wrapper = engine_wrapper(
             &root.join("unused.ps1"),
             &package,
             "install",
-            "safe",
             Some((&pending, &record)),
         )
         .unwrap();
@@ -1135,7 +1154,6 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
                 "Get-ClaudeConfigPaths",
                 "Test-ClaudeDesktopProcessPath",
                 "Stop-ClaudeProcesses",
-                "Disable-FridaResidentForDiskInstall",
                 "Remove-LegacyAppxForkArtifacts",
                 "Repair-ClaudeDesktopShortcut",
                 "Start-CoworkVMService",
@@ -1150,7 +1168,7 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
             source
         };
         let script = root.join("scripts/install_windows.ps1");
-        fs::write(&script, source).unwrap();
+        fs::write(&script, &source).unwrap();
         let engine = Engine {
             root: root.clone(),
             script,
@@ -1165,12 +1183,35 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
             architecture: "X64".into(),
         };
         let adapted = adapt_engine(&engine, &package).unwrap();
+        let wrapper = engine_wrapper(&adapted, &package, "install", None).unwrap();
+        assert_eq!(
+            wrapper.contains("-PatchMode"),
+            source.contains("$PatchMode")
+        );
         let output = fs::read_to_string(adapted).unwrap();
-        fs::remove_dir_all(root).unwrap();
         assert!(!output.contains("Enable-WriteAccess $resourcesPath"));
         assert!(output.contains("function Stop-ClaudeProcesses {\n$ErrorActionPreference"));
         assert!(output.contains("GetOwnerSid"));
         assert!(output.contains("__effortLabelReplacementCount"));
+        if !source.contains("Disable-FridaResidentForDiskInstall") {
+            let legacy =
+                "function Disable-FridaResidentForDiskInstall { throw 'legacy side effect' }";
+            fs::write(&engine.script, format!("{source}\n{legacy}")).unwrap();
+            let adapted = adapt_engine(&engine, &package).unwrap();
+            let output = fs::read_to_string(adapted).unwrap();
+            assert!(output.contains("function Disable-FridaResidentForDiskInstall { }"));
+            assert!(!output.contains("legacy side effect"));
+            // A dangling call still signals an incompatible engine, not a removed feature.
+            fs::write(
+                &engine.script,
+                format!("{source}\nDisable-FridaResidentForDiskInstall"),
+            )
+            .unwrap();
+            assert!(adapt_engine(&engine, &package)
+                .unwrap_err()
+                .contains("最新引擎缺少 Disable-FridaResidentForDiskInstall"));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1225,7 +1266,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
         for (index, (action, mode)) in [
             ("install", "safe"),
             ("uninstall", "safe"),
-            ("install", "official"),
+            ("install", "safe"),
             ("uninstall", "safe"),
         ]
         .into_iter()
@@ -1241,6 +1282,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
                 "Latest engine changed; review its side effects before executing"
             );
             let script = adapt_engine(&engine, &package).unwrap();
+            let mode_argument = engine_mode_argument(&script).unwrap();
             let content = fs::read_to_string(&script).unwrap().replace(
                 "Global\\ClaudeDesktopZhCn-Installer",
                 &format!("Local\\ClaudeWindowsCN-Isolated-{}", std::process::id()),
@@ -1264,9 +1306,9 @@ function Remove-ItemProperty {{ throw 'Forbidden registry mutation in isolated t
 function Add-AppxPackage {{ throw 'Forbidden registration in isolated test' }}
 function Remove-AppxPackage {{ throw 'Forbidden registration in isolated test' }}
 function taskkill {{ throw 'Forbidden process kill in isolated test' }}
-& {script} {action} 'zh-CN' -PatchMode {mode}
+& {script} {action} 'zh-CN' {mode_argument}
 exit $LASTEXITCODE
-"#, full=ps_quote(&package.package_full_name), target=ps_path(&package_root), script=ps_path(&script), action=ps_quote(action), mode=ps_quote(mode))).unwrap();
+"#, full=ps_quote(&package.package_full_name), target=ps_path(&package_root), script=ps_path(&script), action=ps_quote(action))).unwrap();
             let result = util::run_script(&wrapper);
             fs::write(
                 root.join(format!("{index}-{action}-{mode}.log")),
@@ -1304,13 +1346,8 @@ exit $LASTEXITCODE
             }
             let exe = util::sha256(&package.exe()).unwrap();
             let asar = util::sha256(&package.resources().join("app.asar")).unwrap();
-            if action == "uninstall" || mode == "safe" {
-                assert_eq!(exe, original_exe);
-                assert_eq!(asar, original_asar);
-            } else {
-                assert_ne!(exe, original_exe);
-                assert_ne!(asar, original_asar);
-            }
+            assert_eq!(exe, original_exe);
+            assert_eq!(asar, original_asar);
             let locale: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(root.join("roaming/Claude/config.json")).unwrap(),
             )

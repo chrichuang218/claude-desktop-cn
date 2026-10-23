@@ -1,6 +1,6 @@
 # 图标来源与再生成
 
-运行中窗口通过 `set_default_window_icon` 使用现有的 `128x128@2x.png`（256px）。Tauri 的 ICO 解码只取第一帧，而当前 ICO 第一帧是 16px；直接作为窗口图标会在任务栏放大后变糊。EXE 文件和快捷方式继续使用多尺寸 ICO。
+运行中窗口通过 `set_default_window_icon` 使用现有的 `128x128@2x.png`（256px）。Tauri/Tao 在 Windows 上只设置 `ICON_SMALL`，因此主窗口创建后还会将同一个图标设置为任务栏使用的 `ICON_BIG`。该图标由窗口持有至销毁。Tauri 的 ICO 解码只取第一帧，而当前 ICO 第一帧是 16px；直接作为窗口图标会在任务栏放大后变糊。EXE 文件和快捷方式继续使用多尺寸 ICO。
 
 `public/claude-icon.svg` 为界面与助手图标的矢量母版：沿用陶土底色与白色 Claude 标记。标记路径来自 [Simple Icons Claude (CC0)](https://github.com/simple-icons/simple-icons/blob/develop/icons/claude.svg)，于 2026-09-24 获取；未放大旧的 300px 截图。`app-icon.svg` 是同一母版的构建副本。
 

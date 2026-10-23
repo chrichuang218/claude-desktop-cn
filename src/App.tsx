@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
-import { ArrowRight, Check, ClipboardCopy, Copy, Download, FolderOpen, Languages, LayoutDashboard, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
+import { ArrowRight, Check, ClipboardCopy, Copy, Download, FolderOpen, Info, Languages, LayoutDashboard, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import './App.css'
@@ -8,7 +8,7 @@ import './App.css'
 type Page = 'startup' | 'setup' | 'overview' | 'localize' | 'settings' | 'operation'
 type MainPage = 'overview' | 'localize' | 'settings'
 type InstallMode = 'portable' | 'user' | 'system'
-type PatchMode = 'safe' | 'full'
+type StoredPatchMode = 'safe' | 'full'
 type Platform = 'windows' | 'macos'
 type OperationKind =
   | 'install_assistant' | 'install_claude' | 'check_claude_update' | 'update_claude'
@@ -20,11 +20,11 @@ type ClaudeStatus = {
   version: string
   packageFullName: string
   installPath: string
-  appliedMode: PatchMode | null
+  appliedMode: StoredPatchMode | null
   backupReady: boolean
   externalLocalization: boolean
   patchRecoveryRequired: boolean
-  previousMode?: PatchMode | null
+  previousMode?: StoredPatchMode | null
   message: string
   updateAvailable?: boolean | null
   latestVersion?: string | null
@@ -99,7 +99,7 @@ const confirmationLabels: Partial<Record<OperationKind, string>> = {
 }
 // Successful results worth reporting after returning from the operation page.
 const noticeKinds: OperationKind[] = ['install_claude', 'update_claude', 'apply_patch', 'restore_patch', 'create_claude_shortcut']
-const modeNames: Record<PatchMode, string> = { safe: 'Cowork 兼容', full: '完整汉化' }
+const modeNames: Record<StoredPatchMode, string> = { safe: '本地界面汉化', full: '旧版汉化' }
 
 const defaultConfig: AssistantConfig = {
   assistantInstallMode: 'user',
@@ -180,9 +180,8 @@ function App() {
   const [claude, setClaude] = useState<ClaudeStatus | null>(null)
   const [config, setConfig] = useState(defaultConfig)
   const [page, setPage] = useState<Page>('startup')
-  const [selectedMode, setSelectedMode] = useState<PatchMode>('safe')
   const [operation, setOperation] = useState<OperationSnapshot | null>(null)
-  const [retry, setRetry] = useState<{ kind: OperationKind; mode?: PatchMode } | null>(null)
+  const [retry, setRetry] = useState<{ kind: OperationKind; mode?: 'safe' } | null>(null)
   const [logsExpanded, setLogsExpanded] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [actionError, setActionError] = useState('')
@@ -281,7 +280,6 @@ function App() {
         if (platformResult.status === 'fulfilled') setPlatform(platformResult.value)
         setAssistant(assistantResult.value)
         setClaude(claudeResult.value)
-        setSelectedMode(claudeResult.value.appliedMode ?? claudeResult.value.previousMode ?? 'safe')
         const loaded = configResult.value
         setConfig({ ...defaultConfig, ...loaded, assistantPath: loaded.assistantPath || assistantResult.value.defaultPaths[loaded.assistantInstallMode] })
         const snapshot = operationResult.value
@@ -415,7 +413,7 @@ function App() {
     if (element && followLogs.current) element.scrollTop = element.scrollHeight
   }, [operationId, operation?.logs, logsOpen])
 
-  const startOperation = useCallback(async (kind: OperationKind, mode?: PatchMode, before?: () => Promise<unknown>) => {
+  const startOperation = useCallback(async (kind: OperationKind, mode?: 'safe', before?: () => Promise<unknown>) => {
     setConfirm(null)
     setLogsExpanded(false)
     setActionError('')
@@ -531,23 +529,23 @@ function App() {
     void refreshStatus().catch(() => {})
   }
 
-  const confirmAction = (title: string, text: string, kind: OperationKind, mode?: PatchMode) => {
+  const confirmAction = (title: string, text: string, kind: OperationKind, mode?: 'safe') => {
     setConfirm({ title, text, accept: confirmationLabels[kind] ?? title, action: () => { void startOperation(kind, mode) } })
   }
 
   const localizeCopy = !claude ? '正在读取 Claude 状态。' : !claude.installed ? '先安装 Claude，再选择是否汉化。' : claude.patchRecoveryRequired ? '上次汉化未完成，请前往汉化页查看核查位置。' : claude.externalLocalization ? '检测到其他来源的中文资源或备份，助手不会接管。' : claude.appliedMode ? `已应用汉化 · ${modeNames[claude.appliedMode]}` : claude.previousMode ? `官方更新覆盖了之前的「${modeNames[claude.previousMode]}」汉化。` : '未应用汉化，按需开启。'
   const patchDisabled = busy || !claude?.installed || claude.externalLocalization || claude.patchRecoveryRequired
-  const selectedApplied = claude?.appliedMode === selectedMode
+  const patchApplied = claude?.appliedMode === 'safe'
   const staleMode = claude?.installed && !claude.appliedMode && !claude.externalLocalization && !claude.patchRecoveryRequired ? claude.previousMode ?? null : null
-  const applyMode = (mode: PatchMode) => {
+  const applyPatch = () => {
     const current = claude?.appliedMode
-    const switching = current && current !== mode
-    const coverage = mode === 'full' ? '完整汉化会同时汉化在线页面，可能影响 Cowork。' : 'Cowork 兼容只汉化本地界面，在线页面保持英文。'
+    const switching = current && current !== 'safe'
+    const coverage = '此补丁用于第三方 API 模式的本地界面。官方账号已支持中文，可直接在 Claude 的语言设置中切换。'
     confirmAction(
-      switching ? `切换到「${modeNames[mode]}」？` : `应用「${modeNames[mode]}」？`,
-      switching ? `将关闭 Claude，先按备份恢复当前的「${modeNames[current]}」，再应用「${modeNames[mode]}」。${coverage}` : `将关闭 Claude，备份文件后应用汉化。${coverage}`,
+      switching ? '改用本地界面汉化？' : '应用汉化？',
+      switching ? `将关闭 Claude，先按备份恢复旧版汉化，再应用本地界面汉化。${coverage}` : `将关闭 Claude，备份文件后应用汉化。${coverage}`,
       'apply_patch',
-      mode,
+      'safe',
     )
   }
   const operationFailed = operation?.state === 'error'
@@ -557,7 +555,7 @@ function App() {
     : operation?.step.trim() === title ? '' : operation?.step.trim() ?? ''
   const claudeChecked = checkedAgo(claude?.lastUpdateCheck)
   const assistantChecked = checkedAgo(assistant?.lastUpdateCheck)
-  const staleBanner = staleMode ? <div className="ca-banner" role="status"><div><h3>汉化已被官方更新覆盖</h3><p>Claude 更新后恢复为英文界面，可重新应用之前的「{modeNames[staleMode]}」模式。</p></div><button type="button" className="ca-button ca-primary" onClick={() => applyMode(staleMode)} disabled={patchDisabled}><Languages aria-hidden="true" />重新应用</button></div> : null
+  const staleBanner = staleMode ? <div className="ca-banner" role="status"><div><h3>汉化已被官方更新覆盖</h3><p>Claude 更新后可重新应用 本地界面汉化。</p></div><button type="button" className="ca-button ca-primary" onClick={applyPatch} disabled={patchDisabled}><Languages aria-hidden="true" />重新应用</button></div> : null
   const noticeBanner = notice ? <div className="ca-notice" role="status"><Check aria-hidden="true" /><p>{notice}</p><button type="button" className="ca-icon-button ca-notice-close" aria-label="关闭提示" onClick={() => setNotice('')}><X aria-hidden="true" /></button></div> : null
 
   return (
@@ -585,7 +583,7 @@ function App() {
             {page !== 'overview' ? <header className="ca-heading">
               <div>
                 <h1>{title}</h1>
-                {page === 'localize' || page === 'settings' ? <p className="ca-heading-subtitle">{page === 'localize' ? '选择适合你的中文体验' : '偏好设置与助手信息'}</p> : null}
+                {page === 'localize' || page === 'settings' ? <p className="ca-heading-subtitle">{page === 'localize' ? '简体中文补丁与恢复' : '偏好设置与助手信息'}</p> : null}
               </div>
             </header> : null}
             {page === 'startup' && loadError ? <div className="ca-startup"><p role="alert">{loadError}</p><button type="button" className="ca-button" onClick={loadStartup}>重新检测</button></div> : null}
@@ -615,7 +613,7 @@ function App() {
               <div className="ca-hero"><img src="/claude-icon.svg" className="ca-app-icon" alt="" /><div className="ca-hero-copy"><h2>Claude Desktop</h2><div className="ca-version"><span className="ca-state" data-ok={Boolean(claude?.installed)}>{claude ? claude.installed ? '已安装' : '尚未安装' : '正在检测'}</span>{claude?.installed ? <span>{claude.version || '未知版本'}</span> : null}</div></div>
                 <button type="button" className="ca-button ca-primary ca-launch" onClick={() => claude?.installed ? void openClaude() : confirmAction('安装 Claude', `将下载并安装官方 ${platform === 'macos' ? 'macOS' : 'Windows'} 应用。`, 'install_claude')} disabled={busy || !claude}>{claude?.installed ? <Play aria-hidden="true" /> : <Download aria-hidden="true" />}<span>{claude?.installed ? '打开 Claude' : '安装 Claude'}</span></button>
               </div>
-              {claude?.updateAvailable && claude.installed ? <div className="ca-banner"><div><h3>Claude 有新版本</h3><p>{claude.version || '当前版本'} → {claude.latestVersion}{claude.appliedMode && config.autoReapplyPatch ? '；更新后自动重新应用汉化' : ''}</p></div><button type="button" className="ca-button ca-primary" onClick={() => confirmAction('更新 Claude？', `安装过程中会关闭 Claude，请先保存正在进行的工作。${claude.appliedMode ? config.autoReapplyPatch ? `更新完成后会重新应用「${modeNames[claude.appliedMode]}」${platform === 'windows' ? '，可能请求管理员授权' : ''}。` : '官方更新会覆盖当前汉化，之后可在汉化页重新应用。' : ''}`, 'update_claude')} disabled={busy}><Download aria-hidden="true" />立即更新</button></div> : null}
+              {claude?.updateAvailable && claude.installed ? <div className="ca-banner"><div><h3>Claude 有新版本</h3><p>{claude.version || '当前版本'} → {claude.latestVersion}{claude.appliedMode && config.autoReapplyPatch ? '；更新后自动重新应用汉化' : ''}</p></div><button type="button" className="ca-button ca-primary" onClick={() => confirmAction('更新 Claude？', `安装过程中会关闭 Claude，请先保存正在进行的工作。${claude.appliedMode ? config.autoReapplyPatch ? `更新完成后会应用本地界面汉化${platform === 'windows' ? '，可能请求管理员授权' : ''}。` : '官方更新会覆盖当前汉化，之后可在汉化页重新应用。' : ''}`, 'update_claude')} disabled={busy}><Download aria-hidden="true" />立即更新</button></div> : null}
               {staleBanner}
               <div className="ca-status-card">
                 <div className="ca-row"><span className="ca-row-icon"><Download aria-hidden="true" /></span><div><h3>应用更新</h3><p>{claude?.updateCheckError || (claude?.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</p></div><button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy || !claude?.installed}><RefreshCw aria-hidden="true" />检查更新</button></div>
@@ -639,23 +637,34 @@ function App() {
               </div> : null}
               {claude?.externalLocalization && !claude.patchRecoveryRequired ? <div className="ca-label">检测到其他来源的中文资源或备份，助手不会接管。</div> : null}
               {staleBanner}
-              {(['safe', 'full'] as const).map((mode) => <label className="ca-mode" key={mode}><input type="radio" name="ca-patch-mode" checked={selectedMode === mode} onChange={() => setSelectedMode(mode)} disabled={busy} /><span><span className="ca-mode-title"><b>{modeNames[mode]}</b>{mode === 'safe' ? <em>推荐</em> : null}{claude?.appliedMode === mode ? <span className="ca-applied" role="status"><Check aria-hidden="true" />已应用</span> : null}</span><p>{mode === 'safe' ? '汉化本地界面，优先保留 Cowork 兼容性；在线页面保持英文。' : '同时汉化在线页面，覆盖范围更广，可能影响 Cowork。'}</p></span></label>)}
-              <div className="ca-actions">
-                {selectedApplied ? <button type="button" className="ca-button ca-primary" onClick={() => void openClaude()} disabled={patchDisabled}><Play aria-hidden="true" />打开 Claude</button> : <button type="button" className="ca-button ca-primary" onClick={() => applyMode(selectedMode)} disabled={patchDisabled}><Languages aria-hidden="true" />{claude?.appliedMode ? '切换到此模式' : '应用此模式'}</button>}
-                {selectedApplied ? <button type="button" className="ca-text-button" onClick={() => applyMode(selectedMode)} disabled={patchDisabled}>重新应用汉化</button> : null}
-                <button type="button" className="ca-text-button" onClick={() => confirmAction('恢复原样？', '恢复当前 Claude 版本可验证的原始应用文件，保留登录和聊天数据。', 'restore_patch')} disabled={busy || !claude?.backupReady || claude.patchRecoveryRequired}>恢复原样</button>
+              <div className="ca-localization-card">
+                <div className="ca-localization-header">
+                  <span className="ca-localization-icon"><Languages aria-hidden="true" /></span>
+                  <div><h2>本地界面汉化</h2><p>适用于第三方 API 模式</p></div>
+                  {patchApplied ? <span className="ca-applied" role="status"><Check aria-hidden="true" />已应用</span> : null}
+                </div>
+                <p className="ca-localization-description">将侧边栏、设置、模型选择等本地界面文本翻译为简体中文。</p>
+                <div className="ca-actions ca-localization-actions">
+                  {patchApplied ? <button type="button" className="ca-button ca-primary" onClick={() => void openClaude()} disabled={patchDisabled}><Play aria-hidden="true" />打开 Claude</button> : <button type="button" className="ca-button ca-primary" onClick={applyPatch} disabled={patchDisabled}><Languages aria-hidden="true" />应用汉化</button>}
+                  {patchApplied ? <button type="button" className="ca-text-button" onClick={applyPatch} disabled={patchDisabled}>重新应用</button> : null}
+                  <button type="button" className="ca-text-button ca-localization-restore" onClick={() => confirmAction('恢复原样？', '恢复当前 Claude 版本可验证的原始应用文件，保留登录和聊天数据。', 'restore_patch')} disabled={busy || !claude?.backupReady || claude.patchRecoveryRequired}>恢复原样</button>
+                </div>
+              </div>
+              <div className="ca-native-language-note">
+                <h3>官方账号已内置中文</h3>
+                <p>使用官方账号登录时，可直接在 Claude 的语言设置中切换中文，无需应用此补丁。</p>
               </div>
             </section> : null}
 
             {page === 'settings' ? <section className="ca-pane ca-settings-page" aria-label="设置">
               {noticeBanner}
-              <h2 className="ca-section-title">常规</h2>
+              <h2 className="ca-section-title"><Settings2 aria-hidden="true" />常规</h2>
               <div className="ca-card">
                 <label className="ca-settings-row"><div><h3>自动检查更新{copied === 'saved-daily' ? <span className="ca-saved" role="status"><Check aria-hidden="true" />已保存</span> : null}</h3><p>助手运行时，每天检查 Claude 和助手更新。</p></div><input className="ca-switch" type="checkbox" role="switch" checked={config.dailyUpdateCheck} aria-label="每天自动检查更新" onChange={(event) => void saveSetting('saved-daily', { dailyUpdateCheck: event.target.checked })} /></label>
-                <label className="ca-settings-row"><div><h3>更新后重新汉化{copied === 'saved-reapply' ? <span className="ca-saved" role="status"><Check aria-hidden="true" />已保存</span> : null}</h3><p>通过助手更新 Claude 后，自动重新应用之前的汉化模式{platform === 'windows' ? '，可能请求管理员授权' : ''}。</p></div><input className="ca-switch" type="checkbox" role="switch" checked={config.autoReapplyPatch} aria-label="更新 Claude 后自动重新汉化" onChange={(event) => void saveSetting('saved-reapply', { autoReapplyPatch: event.target.checked })} /></label>
+                <label className="ca-settings-row"><div><h3>更新后重新汉化{copied === 'saved-reapply' ? <span className="ca-saved" role="status"><Check aria-hidden="true" />已保存</span> : null}</h3><p>通过助手更新 Claude 后，自动应用本地界面汉化{platform === 'windows' ? '，可能请求管理员授权' : ''}。</p></div><input className="ca-switch" type="checkbox" role="switch" checked={config.autoReapplyPatch} aria-label="更新 Claude 后自动重新汉化" onChange={(event) => void saveSetting('saved-reapply', { autoReapplyPatch: event.target.checked })} /></label>
                 <div className="ca-settings-row"><div><h3>桌面快捷方式</h3><p>在桌面创建或修复 Claude Desktop 入口。</p></div><button type="button" className="ca-button" disabled={!claude?.installed} onClick={() => void startOperation('create_claude_shortcut')}>创建或修复</button></div>
               </div>
-              <h2 className="ca-section-title">关于助手</h2>
+              <h2 className="ca-section-title"><Info aria-hidden="true" />关于助手</h2>
               <div className="ca-card">
                 <div className="ca-settings-row"><div><h3>Claude 中文助手 <span className="ca-settings-version">{assistant?.version}</span></h3><p>{assistant?.updateCheckError || (assistantUpdate ? assistantUpdate.available ? `发现新版本 ${assistantUpdate.version}` : assistantUpdate.version ? '已是最新版本' : '暂无可用的助手更新' : assistant ? '检查助手的新版本' : '正在读取版本')}{assistantChecked ? ` · ${assistantChecked}` : ''}</p></div>{assistantUpdate?.available ? <button type="button" className="ca-button ca-primary" onClick={() => confirmAction('更新助手？', '将校验下载文件并替换当前助手，失败时恢复旧文件。', 'install_assistant_update')}><Download aria-hidden="true" />安装 {assistantUpdate.version}</button> : <button type="button" className="ca-button" onClick={() => void startOperation('check_assistant_update')}><RefreshCw aria-hidden="true" />检查更新</button>}</div>
                 {assistantUpdate?.available && assistant?.releaseNotes ? <div className="ca-release-notes"><h4>{assistantUpdate.version} 更新内容</h4><p>{assistant.releaseNotes}</p></div> : null}

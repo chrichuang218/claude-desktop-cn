@@ -83,9 +83,6 @@ class MacEngineAdapterTests(unittest.TestCase):
     def test_safe_mode_restricts_target_and_disables_upstream_side_effects(self):
         self.check_mode("safe", True)
 
-    def test_full_mode_restricts_target_and_disables_upstream_side_effects(self):
-        self.check_mode("full", False)
-
     def test_invalid_targets_and_mode_fail_before_importing_upstream(self):
         outside = self.root / "Claude.app"
         wrong_name = self.work / "Other.app"
@@ -93,7 +90,7 @@ class MacEngineAdapterTests(unittest.TestCase):
         for app in (outside, wrong_name, nested):
             app.mkdir()
         cases = [(outside, "safe"), (wrong_name, "safe"), (nested, "safe"),
-                 (self.app, "unknown"), (self.work / "missing.app", "full")]
+                 (self.app, "unknown"), (self.app, "full"), (self.work / "missing.app", "safe")]
         for app, mode in cases:
             with self.subTest(app=app, mode=mode):
                 result = self.invoke(mode, app)
@@ -116,7 +113,7 @@ class MacEngineAdapterTests(unittest.TestCase):
 
     def test_returned_nonzero_exit_code_is_preserved(self):
         self.script.write_text(FAKE_UPSTREAM.replace("return 0", "return 17"), encoding="utf-8")
-        self.assertEqual(self.invoke("full").returncode, 17)
+        self.assertEqual(self.invoke("safe").returncode, 17)
 
     def test_raised_nonzero_exit_code_is_preserved(self):
         self.script.write_text(FAKE_UPSTREAM.replace("return 0", "raise SystemExit(23)"), encoding="utf-8")
@@ -184,17 +181,14 @@ class MacEngineAdapterTests(unittest.TestCase):
             spec.loader.exec_module(upstream)
             for name in ("main", "quit_claude", "set_user_locale", "verify", "backup_and_replace"):
                 self.assertTrue(callable(getattr(upstream, name, None)), name)
-            for mode in ("safe", "full"):
-                argv = [str(UPSTREAM), "--app", str(self.app), "--user-home", str(self.work), "--lang", "zh-CN"]
-                if mode == "safe":
-                    argv.append("--skip-asar-patch")
-                with patch.object(sys, "argv", argv), patch.object(argparse.ArgumentParser, "parse_args", capture_args):
-                    with self.assertRaises(Parsed):
-                        upstream.main()
-                self.assertEqual(parsed[-1].app, self.app)
-                self.assertEqual(parsed[-1].user_home, self.work)
-                self.assertEqual(parsed[-1].lang, "zh-CN")
-                self.assertEqual(parsed[-1].skip_asar_patch, mode == "safe")
+            argv = [str(UPSTREAM), "--app", str(self.app), "--user-home", str(self.work), "--lang", "zh-CN", "--skip-asar-patch"]
+            with patch.object(sys, "argv", argv), patch.object(argparse.ArgumentParser, "parse_args", capture_args):
+                with self.assertRaises(Parsed):
+                    upstream.main()
+            self.assertEqual(parsed[-1].app, self.app)
+            self.assertEqual(parsed[-1].user_home, self.work)
+            self.assertEqual(parsed[-1].lang, "zh-CN")
+            self.assertTrue(parsed[-1].skip_asar_patch)
 
 
 if __name__ == "__main__":

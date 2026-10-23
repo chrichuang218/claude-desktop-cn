@@ -554,8 +554,8 @@ fn commit_bundle(
 }
 
 pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome, String> {
-    if !matches!(mode, "safe" | "full") {
-        return Err("汉化模式无效。".into());
+    if mode != "safe" {
+        return Err("仅支持 Cowork 兼容汉化。".into());
     }
     if record("patch-pending.json")?.exists() {
         return Err("上次汉化未完成，请先人工核查保留的备份。".into());

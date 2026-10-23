@@ -29,7 +29,7 @@ def main():
     script, app, work, mode = sys.argv[1:]
     work = Path(work).resolve(strict=True)
     app = Path(app).resolve(strict=True)
-    if app.parent != work or app.name != "Claude.app" or mode not in ("safe", "full"):
+    if app.parent != work or app.name != "Claude.app" or mode != "safe":
         raise RuntimeError("Invalid isolated patch target")
     temp = work / "temporary"
     temp.mkdir()
@@ -44,9 +44,7 @@ def main():
     # after the patched bundle passed verification and was installed.
     upstream.quit_claude = lambda: None
     upstream.set_user_locale = lambda *_args, **_kwargs: None
-    sys.argv = [script, "--app", str(app), "--user-home", str(work), "--lang", "zh-CN"]
-    if mode == "safe":
-        sys.argv.append("--skip-asar-patch")
+    sys.argv = [script, "--app", str(app), "--user-home", str(work), "--lang", "zh-CN", "--skip-asar-patch"]
     return upstream.main()
 
 
