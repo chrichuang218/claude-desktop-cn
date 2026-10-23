@@ -163,6 +163,22 @@ fn choose_assistant_install_path() -> Result<Option<String>, String> {
     assistant::choose_install_path()
 }
 
+#[cfg(target_os = "windows")]
+fn set_windows_taskbar_icon(hwnd: windows_sys::Win32::Foundation::HWND) -> Result<(), String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageW, ICON_BIG, ICON_SMALL, WM_GETICON, WM_SETICON,
+    };
+    // Tao only sets ICON_SMALL. Reuse its 256px icon, owned for the window's lifetime.
+    unsafe {
+        let icon = SendMessageW(hwnd, WM_GETICON, ICON_SMALL as usize, 0);
+        if icon == 0 {
+            return Err("无法读取助手窗口图标。".into());
+        }
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, icon);
+    }
+    Ok(())
+}
+
 pub fn run() {
     if util::run_helper_if_requested() {
         return;
@@ -184,6 +200,16 @@ pub fn run() {
     // Tauri decodes only the first ICO frame (16px); do not upscale it for the taskbar.
     context.set_default_window_icon(Some(tauri::include_image!("icons/128x128@2x.png")));
     tauri::Builder::default()
+        .setup(|_app| {
+            #[cfg(target_os = "windows")]
+            set_windows_taskbar_icon(
+                _app.get_webview_window("main")
+                    .ok_or("助手主窗口不存在。")?
+                    .hwnd()?
+                    .0,
+            )?;
+            Ok(())
+        })
         .manage(OperationState::new())
         .invoke_handler(tauri::generate_handler![
             get_platform,
@@ -206,6 +232,47 @@ pub fn run() {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn taskbar_icon_uses_the_existing_window_icon() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, LoadIconW, SendMessageW, ICON_BIG, ICON_SMALL,
+            IDI_APPLICATION, WM_GETICON, WM_SETICON,
+        };
+        unsafe {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let hwnd = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert!(!hwnd.is_null());
+            let missing = set_windows_taskbar_icon(hwnd);
+            let icon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+            assert!(!icon.is_null());
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, icon as isize);
+            let before = SendMessageW(hwnd, WM_GETICON, ICON_BIG as usize, 0);
+            let result = set_windows_taskbar_icon(hwnd);
+            let after = SendMessageW(hwnd, WM_GETICON, ICON_BIG as usize, 0);
+            let small = SendMessageW(hwnd, WM_GETICON, ICON_SMALL as usize, 0);
+            DestroyWindow(hwnd);
+            assert_eq!(before, 0);
+            assert!(result.is_ok());
+            assert_eq!(after, icon as isize);
+            assert_eq!(small, icon as isize);
+            assert!(missing.is_err());
+        }
+    }
 
     #[test]
     fn initial_size_preserves_css_space_until_the_work_area_is_full() {

@@ -12,13 +12,13 @@
 
 </div>
 
-安装、更新、启动 Claude Desktop，以及应用或恢复汉化，都在一个小工具里完成。已有官方应用可以直接检测使用；汉化由你选择，更新后也不会自动重新应用。
+安装、更新、启动 Claude Desktop，以及应用或恢复汉化，都在一个小工具里完成。已有官方应用可以直接检测使用，汉化由你选择；通过助手更新 Claude 后，可按设置自动重新应用本地界面汉化。
 
 > 本项目是第三方工具，与 Anthropic 没有从属关系。助手和 Claude Desktop 是两个独立应用，分别安装、更新和卸载。
 
 > 仓库已更名为 `claude-desktop-cn`，v0.2.0 起仅使用新仓库更新源。0.1.x 用户请退出旧助手，用 v0.2.0 的 EXE 手动替换安装目录中的同名文件；原安装路径和配置继续保留。
 
-> v0.2.0 提供 Windows 正式版和 **macOS 预览版**。Mac 双架构已通过原生 CI、自动测试和包内自检，功能实现与 Windows 对齐；真实 Claude 的安装、汉化恢复、权限和 Cowork 尚未完成交互验收。当前截图来自 Windows，具体范围见 [macOS 验收清单](docs/macos-acceptance.md)。
+> 提供 Windows 正式版和 **macOS 预览版**。Mac 双架构通过原生 CI 构建、自动测试和包内自检；真实 Claude 的安装、汉化恢复、权限和 Cowork 尚未完成交互验收。下方助手界面使用模拟状态展示，具体范围见 [macOS 验收清单](docs/macos-acceptance.md)。
 
 ## 界面预览
 
@@ -26,67 +26,35 @@
 
 <img src="docs/images/overview.png" alt="Claude 中文助手概览页：查看 Claude Desktop 版本、检查更新、打开应用和查看汉化状态" width="736" />
 
-### 汉化 · 选择适合你的中文体验
+### 汉化 · 本地中文界面与恢复
 
-<img src="docs/images/localization.png" alt="Claude 中文助手汉化页：选择 Cowork 兼容或完整汉化，应用补丁或恢复原样" width="736" />
+汉化页集中展示适用范围、补丁状态和操作按钮。只有本地界面汉化一个入口，可应用、重新应用或恢复原样；官方账号的中文设置另有说明。
 
-### Claude Desktop · 汉化效果
+### 设置 · 更新偏好与助手管理
 
-具体汉化覆盖随 Claude 版本和所选模式变化。
-
-**Cowork 首页与语言菜单**
-
-<img src="docs/images/desktop-cowork.png" alt="Claude Desktop 汉化效果：Cowork 首页与语言选择菜单" width="736" />
-
-**项目页面**
-
-<img src="docs/images/desktop-projects.png" alt="Claude Desktop 汉化效果：项目页面" width="736" />
-
-<details>
-<summary>更多 Desktop 汉化效果</summary>
-
-**计费设置**
-
-<img src="docs/images/desktop-billing.png" alt="Claude Desktop 汉化效果：计费设置页面" width="736" />
-
-**计划任务**
-
-<img src="docs/images/desktop-scheduled-tasks.png" alt="Claude Desktop 汉化效果：计划任务页面" width="736" />
-
-**Code 界面**
-
-<img src="docs/images/desktop-code.png" alt="Claude Desktop 汉化效果：Code 界面" width="736" />
-
-**自定义设置**
-
-<img src="docs/images/desktop-customize.png" alt="Claude Desktop 汉化效果：自定义设置页面" width="736" />
-
-</details>
+设置页按“常规”“关于助手”和卸载区分组，提供自动检查更新、更新后重新汉化、快捷方式及助手更新入口。汉化页与设置页沿用概览的柔和暖色。
 
 ## 能做什么
 
 - **管理官方应用**：检测已有 Claude Desktop，提供官方安装、更新与启动入口，下载包进行签名校验。
-- **两种汉化方式**：侧重 Cowork 兼容，或覆盖更多在线页面；按需应用，也可恢复原样。
+- **本地界面汉化**：为第三方 API 模式补充简体中文界面，保留 Cowork 兼容性；按需应用，也可恢复原样。
 - **跟进上游汉化资源**：每次汉化或恢复前在线确认引擎修订，内容未变且缓存校验通过时直接复用，减少重复下载。
 - **进度和日志可见**：执行过程中展示当前步骤、可用的下载进度与日志，失败时可复制日志排查。
 - **按你的习惯安装**：助手支持便携、当前用户和系统安装；还可独立创建或修复 Claude Desktop 桌面快捷方式。
 - **更新由你决定**：可在助手运行时每天检查 Claude 和助手的新版本，安装前由你确认。
 
-## 选哪种汉化？
+## 汉化范围
 
-| 模式 | 汉化范围 | Cowork |
-| --- | --- | --- |
-| **Cowork 兼容 · 推荐** | 本地界面；在线页面覆盖有限 | 优先保留兼容性 |
-| **完整汉化** | 本地界面，以及聊天、项目等在线页面 | 可能影响兼容性 |
+助手仅提供 **本地界面汉化**，面向第三方 API 模式，翻译侧边栏、设置、模型选择等本地文本。官方账号界面已原生支持中文，可直接在 Claude 的语言设置中切换，无需安装此补丁。翻译覆盖与兼容性取决于 Claude 版本和上游汉化引擎，不能保证所有页面都能汉化。
 
-日常使用 Cowork，建议先选兼容模式。翻译覆盖与兼容性取决于 Claude 版本和上游汉化引擎，不能保证所有页面都能汉化。
+旧版汉化记录和备份仍可用于恢复原样。重新应用或更新后自动汉化统一使用本地界面汉化。
 
 ## 快速上手
 
 1. 前往 [最新 Release](https://github.com/chrichuang218/claude-desktop-cn/releases/latest)，按下表下载适合系统和芯片架构的包。macOS 附件为预览版；各包均配套同名 `.sha256` 摘要。
 2. 启动助手，选择安装方式和位置。一般选 **用户安装**；**便携方式**默认在当前 EXE 或 `.app` 所在目录使用，不再复制程序。选择其他位置或用户/系统安装时，会保留原始下载文件；安装完成并退出后可删除原始文件，今后使用安装目录中的程序或快捷方式。macOS 用户安装默认为 `~/Applications`，系统安装默认为 `/Applications`，安装目录内的应用名称为 `Claude 中文助手.app`。
 3. 在 **概览** 查看 Claude Desktop 状态。已安装则直接使用；未安装可通过助手下载安装。
-4. 进入 **汉化**，选择模式并确认应用。需要恢复时，点击 **恢复原样**。
+4. 进入 **汉化**，点击 **应用汉化** 并确认。需要恢复时，点击 **恢复原样**。
 
 更新、汉化和恢复可能关闭 Claude Desktop，请先保存正在进行的工作；出现系统权限提示时，按实际操作确认。
 
@@ -100,13 +68,19 @@ macOS 解压后运行 `Claude 中文助手.app`。预览包使用 ad-hoc 本地�
 
 macOS 的汉化和恢复还需要 **Python 3.9 或更新版本**，可通过 [python.org](https://www.python.org/downloads/macos/) 或 Homebrew 安装。助手会检查依赖，缺少时明确提示，不会自动安装 Python；Claude 的安装、更新与启动不需要 Python。
 
-当前版本的验证范围与已知限制见 [更新日志](CHANGELOG.md#020---2026-09-26)。
+当前版本的验证范围与已知限制见 [更新日志](CHANGELOG.md#025---2026-10-23)。
 
 ## 常见问题
 
 ### 更新 Claude 后会自动汉化吗？
 
-不会。更新后请在汉化页查看实际状态，按需重新应用。选中某个模式不代表已经应用，以页面的“已应用”状态为准。
+取决于设置中的“更新后重新汉化”。该选项默认开启：通过助手更新 Claude 后，如果之前已应用汉化，会重新应用本地界面汉化；关闭后只提示汉化已被覆盖，按需手动重新应用。通过 Claude 自身或其他方式更新时，需回到助手查看实际状态。
+
+### 提示“最新引擎缺少 Disable-FridaResidentForDiskInstall”怎么办？
+
+升级到 **v0.2.5 或更新版本**。上游移除了旧 Frida 常驻功能和 Windows 的 `PatchMode` 参数，旧助手仍要求这些接口存在，因而在执行汉化前失败。新版已适配，清除缓存不能解决旧助手的接口不兼容。
+
+原“完整汉化”入口已移除；官方账号请使用 Claude 自带的中文设置。已有汉化备份仍可用于“恢复原样”，无需删除数据目录。
 
 ### 恢复原样会删除聊天记录吗？
 
@@ -122,7 +96,7 @@ macOS 的汉化和恢复还需要 **Python 3.9 或更新版本**，可通过 [py
 
 ### 遇到问题如何反馈？
 
-在执行页复制日志，通过 [Issues](https://github.com/chrichuang218/claude-desktop-cn/issues) 提供系统版本、芯片架构、Claude 版本、汉化模式和复现步骤。发送前请检查日志中的用户名、路径等个人信息。
+在执行页复制日志，通过 [Issues](https://github.com/chrichuang218/claude-desktop-cn/issues) 提供系统版本、芯片架构、Claude 版本、执行日志和复现步骤。发送前请检查日志中的用户名、路径等个人信息。
 
 ### Windows 提示“上次汉化未完成”怎么办？
 

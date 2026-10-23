@@ -135,8 +135,8 @@ impl OperationState {
         if !KINDS.contains(&kind) {
             return Err(format!("不支持的操作：{kind}"));
         }
-        if kind == "apply_patch" && !matches!(mode, Some("safe" | "full")) {
-            return Err("请选择 Cowork 兼容或完整汉化模式。".into());
+        if kind == "apply_patch" && mode != Some("safe") {
+            return Err("仅支持 Cowork 兼容汉化。".into());
         }
         let config = if kind == "install_assistant" {
             Some(assistant::load_config()?)
@@ -278,7 +278,7 @@ fn reapply_after_update(
             return Ok(outcome);
         }
     };
-    let Some(mode) = status.previous_mode.filter(|_| {
+    let Some(_) = status.previous_mode.filter(|_| {
         status.applied_mode.is_none()
             && !status.external_localization
             && !status.patch_recovery_required
@@ -294,8 +294,8 @@ fn reapply_after_update(
             outcome.message
         )));
     }
-    operation.step("官方更新已覆盖汉化，重新应用之前的模式");
-    patch::apply(&mode, operation)
+    operation.step("官方更新已覆盖汉化，重新应用 Cowork 兼容汉化");
+    patch::apply("safe", operation)
         .map(|applied| OperationOutcome::done(format!("{}{}", outcome.message, applied.message)))
         .map_err(|error| format!("Claude Desktop 已更新，但重新应用汉化失败：{error}"))
 }
@@ -316,6 +316,7 @@ mod tests {
         assert!(state.start("unknown", None).is_err());
         assert_eq!(state.snapshot().state, "idle");
         assert!(state.start("apply_patch", Some("invalid")).is_err());
+        assert!(state.start("apply_patch", Some("full")).is_err());
         assert_eq!(state.snapshot().state, "idle");
     }
 
