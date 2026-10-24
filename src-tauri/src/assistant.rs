@@ -756,10 +756,18 @@ mod tests {
                 .unwrap()
                 .join("Portable")
                 .join(util::PRODUCT_DIR);
+            // WScript.Shell passes shortcut names through the ANSI code page, so the
+            // Chinese-named link only exists where that code page has those characters
+            // (not on English CI runners).
+            let shortcut = util::powershell(
+                "$n='中文助手'; $e=[Text.Encoding]::Default; $e.GetString($e.GetBytes($n)) -eq $n",
+            )
+            .unwrap()
+                == "True";
             let config = AssistantConfig {
                 assistant_install_mode: "portable".into(),
                 assistant_path: destination.display().to_string(),
-                create_assistant_shortcut: true,
+                create_assistant_shortcut: shortcut,
                 daily_update_check: false,
                 auto_reapply_patch: true,
             };
@@ -768,7 +776,7 @@ mod tests {
             install(config, &operation).unwrap();
             let target = destination.join(util::EXE_NAME);
             let assistant_link = desktop.join("Claude Windows 中文助手.lnk");
-            assert!(target.is_file() && assistant_link.is_file());
+            assert!(target.is_file() && assistant_link.is_file() == shortcut);
 
             // Leftovers the uninstall must remove, beside a junction it must not follow.
             fs::create_dir_all(data.join("official-msix")).unwrap();
