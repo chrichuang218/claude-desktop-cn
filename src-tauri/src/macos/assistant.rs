@@ -590,42 +590,63 @@ pub fn uninstall(operation: &OperationState) -> Result<OperationOutcome, String>
     let directory = validate_directory(Path::new(&record.install_path))?;
     let target = directory.join(APP_NAME);
     validate_bundle(&target, None)?;
-    let running = current_bundle().ok().is_some_and(|bundle| bundle == target);
     operation.step("卸载 Claude 中文助手");
     let link = desktop_link()?;
+    let data = util::data_dir()?;
     // Removing an open bundle is supported by macOS; the current process exits
     // after recording the outcome. Never remove the containing Applications folder.
     let result: Result<(), String> = (|| {
-        run_shell(&format!("[ ! -L {target} ]\n[ \"$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' {plist})\" = {identity} ]\n/bin/rm -rf -- {target}",
-            target=shell_quote(&target), plist=shell_quote(target.join("Contents/Info.plist")), identity=shell_quote(BUNDLE_ID)),
-            record.mode == "system" || needs_elevation(&target)?)?;
+        // Every deletion runs in this one shell, after the administrator prompt
+        // when one is needed, so cancelling it changes nothing. Claude itself is
+        // never touched. The Claude shortcut goes first, then the app bundle,
+        // then the whole data directory: rm -rf removes a link, never its target,
+        // and find -H first empties a data directory that was moved behind one.
+        let mut script = String::new();
+        if let Some((claude_link, claude_target)) = crate::claude::owned_desktop_shortcut()? {
+            script.push_str(&format!(
+                "if [ -L {link} ] && [ \"$(/usr/bin/readlink {link})\" = {target} ]; then /bin/rm -f -- {link}; fi\n",
+                link = shell_quote(&claude_link),
+                target = shell_quote(&claude_target),
+            ));
+        }
+        script.push_str(&format!("[ ! -L {target} ]\n[ \"$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' {plist})\" = {identity} ]\n/bin/rm -rf -- {target}\n",
+            target=shell_quote(&target), plist=shell_quote(target.join("Contents/Info.plist")), identity=shell_quote(BUNDLE_ID)));
+        script.push_str(&format!(
+            "if [ -d {data} ]; then /usr/bin/find -H {data} -mindepth 1 -maxdepth 1 -exec /bin/rm -rf -- {{}} +; fi\n/bin/rm -rf -- {data}\n",
+            data = shell_quote(&data),
+        ));
+        run_shell(
+            &script,
+            record.mode == "system" || needs_elevation(&target)?,
+        )?;
         if fs::symlink_metadata(&target).is_ok() {
             return Err("卸载操作结束后助手应用包仍存在。".into());
         }
         if fs::read_link(&link).ok().as_ref() == Some(&target) {
             fs::remove_file(link).map_err(|error| error.to_string())?;
         }
-        fs::remove_file(installed_record_path()?).map_err(|error| error.to_string())?;
         Ok(())
     })();
-    write_json(
-        &util::data_dir()?.join("installer/uninstall-result.json"),
-        &crate::self_update::UpdateResult {
-            ok: result.is_ok(),
-            message: result
-                .as_ref()
-                .map(|_| "助手应用包与入口已卸载，设置及操作记录已保留。".to_string())
-                .unwrap_or_else(Clone::clone),
-        },
-    )?;
-    result?;
-    if running {
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            std::process::exit(0);
-        });
+    // Success leaves nothing behind; only a failure is recorded for the next launch.
+    if let Err(error) = &result {
+        write_json(
+            &data.join("installer/uninstall-result.json"),
+            &crate::self_update::UpdateResult {
+                ok: false,
+                message: error.clone(),
+            },
+        )?;
     }
-    Ok(OperationOutcome::done("助手已卸载，设置及操作记录已保留。"))
+    result?;
+    // Once uninstalled the assistant leaves: a copy left open would write its
+    // update checks back into the deleted data directory.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::process::exit(0);
+    });
+    Ok(OperationOutcome::done(
+        "助手已卸载，助手数据已清除，助手即将退出。",
+    ))
 }
 
 pub fn choose_install_path() -> Result<Option<String>, String> {

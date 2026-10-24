@@ -73,6 +73,67 @@ pub(crate) fn download_engine(
     })
 }
 
+/// Keeps only the archive for `keep_sha256`; metadata.json can reference no other.
+/// `root` is the trusted data directory that `cache_dir` must stay inside.
+pub(crate) fn prune(root: &Path, cache_dir: &Path, keep_sha256: &str) -> Vec<String> {
+    let keep = format!("{keep_sha256}.zip");
+    util::remove_entries(root, cache_dir, |name| {
+        (name.ends_with(".zip") && name != keep)
+            || (name.ends_with(".partial") && util::is_stale(&cache_dir.join(name)))
+    })
+}
+
+/// Startup variant of [`prune`] for archives left by earlier versions.
+pub(crate) fn prune_unreferenced(root: &Path, cache_dir: &Path) -> Vec<String> {
+    let metadata = cache_dir.join("metadata.json");
+    let keep = match fs::read(&metadata) {
+        // Without valid metadata no archive can be reused, so none is kept.
+        Ok(bytes) => serde_json::from_slice::<EngineCache>(&bytes)
+            .map(|cache| cache.sha256)
+            .unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return vec![format!("读取 {} 失败：{error}", metadata.display())],
+    };
+    prune(root, cache_dir, &keep)
+}
+
+/// Successful runs remove their own directory; failed runs keep their logs
+/// until newer failures replace them. A transaction awaiting manual review
+/// keeps every run, since its logs are part of the evidence.
+pub(crate) fn prune_failed_runs(root: &Path, engine_dir: &Path, pending: &Path) -> Vec<String> {
+    match fs::symlink_metadata(pending) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => util::keep_newest_entries(
+            root,
+            engine_dir,
+            |name| name.starts_with("run-"),
+            util::KEPT_FAILED_RUNS,
+        ),
+        Ok(_) => Vec::new(),
+        Err(error) => vec![format!(
+            "读取 {} 失败，保留全部引擎记录：{error}",
+            pending.display()
+        )],
+    }
+}
+
+/// Ends an engine run once its outcome is known. Retention runs afterwards so
+/// this run's failure counts, and the pending record is checked at that point
+/// because this run may itself have left a transaction for manual review.
+pub(crate) fn finish_run(
+    root: &Path,
+    engine_dir: &Path,
+    pending: &Path,
+    work: &Path,
+    succeeded: bool,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    if succeeded {
+        errors.extend(util::remove_work_dir(work).err());
+    }
+    errors.extend(prune_failed_runs(root, engine_dir, pending));
+    errors
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +141,87 @@ mod tests {
         env,
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = env::temp_dir().join(format!(
+            "{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn prune_keeps_only_the_referenced_archive() {
+        let root = scratch("engine-cache-prune");
+        let cache_dir = root.join("patch-engine/cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        for name in ["aaa.zip", "bbb.zip", "archive.partial"] {
+            fs::write(cache_dir.join(name), name).unwrap();
+        }
+        fs::write(
+            cache_dir.join("metadata.json"),
+            r#"{"source":"x","etag":null,"sha256":"bbb"}"#,
+        )
+        .unwrap();
+        assert!(prune_unreferenced(&root, &cache_dir).is_empty());
+        // A fresh partial may belong to a running publish and must survive.
+        assert_eq!(
+            names(&cache_dir),
+            ["archive.partial", "bbb.zip", "metadata.json"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_runs_are_counted_after_each_outcome_and_pending_keeps_all() {
+        let root = scratch("engine-runs");
+        let engine_dir = root.join("patch-engine");
+        fs::create_dir_all(engine_dir.join("cache")).unwrap();
+        let pending = root.join("patch-pending.json");
+        let mut index = 0;
+        // Mirrors the production order: create this run's directory, run, then finish.
+        let mut run = |succeeded: bool, leaves_pending: bool| {
+            index += 1;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let work = engine_dir.join(format!("run-1-{index}"));
+            fs::create_dir(&work).unwrap();
+            fs::write(work.join("helper-live.log"), "log").unwrap();
+            if leaves_pending {
+                fs::write(&pending, "{}").unwrap();
+            }
+            finish_run(&root, &engine_dir, &pending, &work, succeeded)
+        };
+        for _ in 0..3 {
+            assert!(run(false, false).is_empty());
+        }
+        assert_eq!(names(&engine_dir), ["cache", "run-1-2", "run-1-3"]);
+        // A success removes only itself; the two kept failures stay.
+        assert!(run(true, false).is_empty());
+        assert_eq!(names(&engine_dir), ["cache", "run-1-2", "run-1-3"]);
+        // A failure that leaves a transaction for review keeps every run.
+        assert!(run(false, true).is_empty());
+        assert!(run(false, false).is_empty());
+        assert_eq!(
+            names(&engine_dir),
+            ["cache", "run-1-2", "run-1-3", "run-1-5", "run-1-6"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn engine_cache_revalidates_and_rejects_corruption_and_network_errors() {
         use std::io::{Read, Write};

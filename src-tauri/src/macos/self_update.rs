@@ -26,6 +26,15 @@ static CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 include!("../self_update_shared.rs");
 
+/// Startup cleanup: each update removes its own extraction; stale ones were left by a crash.
+/// The single archive is overwritten by the next update and kept as diagnostic evidence.
+pub fn clean_cache(data: &Path) -> Vec<String> {
+    let work = data.join("self-update");
+    util::remove_entries(data, &work, |name| {
+        name.starts_with("unpack-") && util::is_stale(&work.join(name))
+    })
+}
+
 fn release_api(url: &str, allow_missing: bool) -> Result<Option<Release>, String> {
     let response = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(30))

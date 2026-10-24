@@ -293,6 +293,11 @@ fn user_desktop() -> Result<PathBuf, String> {
 }
 
 fn run_system_script(script: &Path, work: &Path) -> Result<String, String> {
+    // Stands in for a cancelled UAC prompt, which a test cannot click.
+    #[cfg(test)]
+    if env::var_os("CLAUDE_WINDOWS_CN_TEST_CANCEL_ELEVATION").is_some() {
+        return Err("管理员操作未启动（可能取消了 UAC）：测试模拟取消。".into());
+    }
     // The test binary has no application helper entry point. The opt-in test
     // runs the same generated script from an already elevated shell.
     #[cfg(test)]
@@ -457,11 +462,19 @@ pub fn uninstall(operation: &OperationState) -> Result<OperationOutcome, String>
     if !path.join(util::EXE_NAME).is_file() {
         return Err("助手安装文件不存在，已停止卸载。".into());
     }
-    let work = util::data_dir()?.join("installer");
-    fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let data = util::data_dir()?;
+    // The scripts live outside the data directory, which they remove last.
+    let work = env::temp_dir().join(format!(
+        "claude-windows-cn-uninstall-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos()
+    ));
     let script_path = work.join("uninstall-assistant.ps1");
-    let record_path = installed_record_path()?;
-    let desktop = user_desktop()?.join("Claude Windows 中文助手.lnk");
+    let desktop_dir = user_desktop()?;
+    let desktop = desktop_dir.join("Claude Windows 中文助手.lnk");
     let registry = if manifest.mode == "system" {
         "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ClaudeWindowsCN"
     } else {
@@ -475,7 +488,6 @@ pub fn uninstall(operation: &OperationState) -> Result<OperationOutcome, String>
 $dest={dest}
 $exe=Join-Path $dest {exe}
 $manifest=Join-Path $dest 'install.json'
-$record={record}
 $link={link}
 $shell=New-Object -ComObject WScript.Shell
 $removeLink=(Test-Path -LiteralPath $link) -and ($shell.CreateShortcut($link).TargetPath -eq $exe)
@@ -497,18 +509,34 @@ if ({registered}) {{
     }}
 }}
 if ({wait}) {{ Wait-Process -Id {pid} -Timeout 60 -ErrorAction SilentlyContinue }}
+{remove_entry}
+# Every deletion happens here, after any administrator prompt. Claude itself is
+# never touched; a localization left in place stays until Claude updates.
+# 1. The Claude shortcut this assistant made; its icon lives in the data.
+{claude_shortcut}
+# 2. The program and its entry points.
 if ($removeLink) {{ Remove-Item -LiteralPath $link -Force -ErrorAction Stop }}
 if ($removeMenu) {{ Remove-Item -LiteralPath $menu -Force -ErrorAction Stop }}
 if ($removeKey) {{ Remove-Item -LiteralPath $key -Force -ErrorAction Stop }}
 Remove-Item -LiteralPath $exe -Force -ErrorAction Stop
 Remove-Item -LiteralPath $manifest -Force -ErrorAction Stop
-Remove-Item -LiteralPath $record -Force -ErrorAction Stop
 if (@(Get-ChildItem -LiteralPath $dest -Force).Count -eq 0) {{ Remove-Item -LiteralPath $dest -Force -ErrorAction Stop }}
+# 3. The whole data directory. A moved one is emptied and only its link goes.
+$data={data}
+if (Test-Path -LiteralPath $data) {{
+    try {{
+        foreach ($entry in [IO.Directory]::GetFileSystemEntries($data)) {{ Remove-AssistantEntry $entry }}
+        Remove-AssistantEntry $data
+    }} catch {{ throw ('助手程序已卸载，但助手数据未能完全删除，可手动删除：' + $data + '。' + $_.Exception.Message) }}
+}}
 "#,
         dest = ps_path(&path),
         exe = ps_quote(util::EXE_NAME),
         link = ps_path(&desktop),
-        record = ps_path(&record_path),
+        remove_entry = REMOVE_ENTRY_FUNCTION,
+        claude_shortcut =
+            crate::claude::remove_desktop_shortcut_script(&desktop_dir, &data.join("icons")),
+        data = ps_path(&data),
         registered = if manifest.mode == "portable" {
             "$false"
         } else {
@@ -523,50 +551,124 @@ if (@(Get-ChildItem -LiteralPath $dest -Force).Count -eq 0) {{ Remove-Item -Lite
         wait = if running_target { "$true" } else { "$false" },
         pid = std::process::id(),
     );
-    util::write_script(&script_path, &script)?;
     operation.step("卸载 Claude 中文助手");
     if running_target {
-        let result_path = work.join("uninstall-result.json");
-        if result_path.exists() {
-            fs::remove_file(&result_path).map_err(|error| error.to_string())?;
-        }
+        let result_path = data.join("installer").join("uninstall-result.json");
         let wrapper_path = work.join("run-uninstall.ps1");
-        let wrapper = format!(
-            r#"$ErrorActionPreference='Stop'
-            $result={result}
-            try {{
-                $output=& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} 2>&1 | Out-String
-                if ($LASTEXITCODE -ne 0) {{ throw $output }}
-                @{{ ok=$true; message='助手文件与入口已卸载。' }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $result -Encoding UTF8
-            }} catch {{
-                @{{ ok=$false; message=$_.Exception.Message }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $result -Encoding UTF8
-            }}
-        "#,
-            result = ps_path(&result_path),
-            script = ps_path(&script_path)
-        );
-        util::write_script(&wrapper_path, &wrapper)?;
-        let launch = format!("Start-Process -FilePath 'powershell.exe' -ArgumentList {} {} -WindowStyle Hidden | Out-Null", ps_quote(format!("-NoProfile -ExecutionPolicy Bypass -File \"{}\"", wrapper_path.display())), if manifest.mode == "system" { "-Verb RunAs" } else { "" });
-        util::powershell(&launch)?;
-        std::thread::spawn(|| {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            std::process::exit(0);
-        });
+        let started = fs::create_dir_all(&work)
+            .map_err(|error| error.to_string())
+            .and_then(|()| util::write_script(&script_path, &script))
+            .and_then(|()| {
+                util::write_script(
+                    &wrapper_path,
+                    &uninstall_wrapper(&script_path, &result_path, &work),
+                )
+            })
+            .and_then(|()| start_after_exit(&wrapper_path, manifest.mode == "system"));
+        if let Err(error) = started {
+            // No wrapper runs to remove the scripts, so they go here. The
+            // original error, such as a cancelled UAC prompt, is what matters.
+            if let Err(cleanup) = util::remove_work_dir(&work) {
+                operation.log(cleanup);
+            }
+            return Err(error);
+        }
+        exit_soon();
         Ok(OperationOutcome::done(
-            "卸载脚本已启动，助手退出后将删除程序文件。",
+            "卸载脚本已启动，助手退出后将删除程序文件和助手数据。",
         ))
     } else {
-        let log = if manifest.mode == "system" {
-            run_system_script(&script_path, &work)?
-        } else {
-            util::run_script(&script_path)?
-        };
-        operation.log(log);
+        let written = fs::create_dir_all(&work)
+            .map_err(|error| error.to_string())
+            .and_then(|()| util::write_script(&script_path, &script));
+        let log = written.and_then(|()| {
+            if manifest.mode == "system" {
+                run_system_script(&script_path, &work)
+            } else {
+                util::run_script(&script_path)
+            }
+        });
+        if let Err(error) = util::remove_work_dir(&work) {
+            operation.log(error);
+        }
+        operation.log(log?);
         if path.join(util::EXE_NAME).exists() {
             return Err("卸载脚本已退出，但助手文件仍存在。".into());
         }
-        Ok(OperationOutcome::done("助手已卸载。"))
+        exit_soon();
+        Ok(OperationOutcome::done(
+            "助手已卸载，助手数据已清除，助手即将退出。",
+        ))
     }
+}
+
+/// Starts the wrapper that finishes the uninstall once this process exits.
+fn start_after_exit(wrapper: &Path, elevated: bool) -> Result<(), String> {
+    // Stands in for a cancelled UAC prompt, which a test cannot click.
+    #[cfg(test)]
+    if env::var_os("CLAUDE_WINDOWS_CN_TEST_CANCEL_ELEVATION").is_some() {
+        return Err("管理员操作未启动（可能取消了 UAC）：测试模拟取消。".into());
+    }
+    let launch = format!(
+        "Start-Process -FilePath 'powershell.exe' -ArgumentList {} {} -WindowStyle Hidden | Out-Null",
+        ps_quote(format!(
+            "-NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+            wrapper.display()
+        )),
+        if elevated { "-Verb RunAs" } else { "" }
+    );
+    util::powershell(&launch).map(|_| ())
+}
+
+/// Once uninstalled the assistant leaves: a copy left open would write its
+/// update checks back into the deleted data directory.
+fn exit_soon() {
+    // Tests run uninstall in their own process and must outlive it.
+    #[cfg(not(test))]
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::process::exit(0);
+    });
+}
+
+// Deletes a file or directory tree for uninstall. A junction or symlink goes as
+// a link, never followed, and read-only attributes are cleared first. Only .NET
+// calls receive the path, so no command interpreter ever parses it again.
+const REMOVE_ENTRY_FUNCTION: &str = r#"function Remove-AssistantEntry([string]$Path) {
+    $attributes=[IO.File]::GetAttributes($Path)
+    $directory=($attributes -band [IO.FileAttributes]::Directory) -ne 0
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if ($directory) { [IO.Directory]::Delete($Path, $false) } else { [IO.File]::Delete($Path) }
+    } elseif ($directory) {
+        foreach ($child in [IO.Directory]::GetFileSystemEntries($Path)) { Remove-AssistantEntry $child }
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Directory)
+        [IO.Directory]::Delete($Path, $false)
+    } else {
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal)
+        [IO.File]::Delete($Path)
+    }
+}"#;
+
+// Runs after the assistant exits. Success leaves nothing behind: the script has
+// removed the data directory and this temporary folder removes itself. Only a
+// failure is recorded, where the next launch of any copy can show it.
+fn uninstall_wrapper(script: &Path, result: &Path, work: &Path) -> String {
+    format!(
+        r#"$ErrorActionPreference='Stop'
+$result={result}
+try {{
+    $output=& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {script} 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {{ throw $output }}
+}} catch {{
+    New-Item -ItemType Directory -Path (Split-Path -Parent $result) -Force | Out-Null
+    @{{ ok=$false; message=$_.Exception.Message }} | ConvertTo-Json -Compress | Set-Content -LiteralPath $result -Encoding UTF8
+}}
+Remove-Item -LiteralPath {work} -Recurse -Force -ErrorAction SilentlyContinue
+"#,
+        result = ps_path(result),
+        script = ps_path(script),
+        work = ps_path(work),
+    )
 }
 
 pub fn choose_install_path() -> Result<Option<String>, String> {
@@ -584,6 +686,297 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use std::{process::Command, time::SystemTime};
+
+    #[cfg(windows)]
+    fn scratch(name: &str) -> PathBuf {
+        let root = env::temp_dir().join(format!(
+            "{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn uninstall_wrapper_leaves_nothing_on_success_and_records_failure() {
+        let root = scratch("claude-uninstall-wrapper");
+        let result = root.join("data/installer/uninstall-result.json");
+        for (inner, succeeds) in [("Write-Output 'done'", true), ("throw 'boom'", false)] {
+            let work = root.join(format!("work-{succeeds}"));
+            fs::create_dir_all(&work).unwrap();
+            let script = work.join("uninstall-assistant.ps1");
+            util::write_script(&script, inner).unwrap();
+            let wrapper = work.join("run-uninstall.ps1");
+            util::write_script(&wrapper, &uninstall_wrapper(&script, &result, &work)).unwrap();
+            util::run_script(&wrapper).unwrap();
+            // The temporary folder goes, including the wrapper that is running.
+            assert!(!work.exists());
+            if succeeds {
+                assert!(!result.exists());
+            } else {
+                let recorded: UninstallResult = serde_json::from_str(
+                    fs::read_to_string(&result)
+                        .unwrap()
+                        .trim_start_matches('\u{feff}'),
+                )
+                .unwrap();
+                assert!(!recorded.ok && recorded.message.contains("boom"));
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clean_uninstall_removes_program_entries_and_all_assistant_data() {
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_CLEAN_UNINSTALL_TEST_CHILD";
+        // Characters a second command interpreter would split or expand.
+        const LOCAL: &str = "Local A&B %PATH% ^x";
+        if env::var_os(CHILD).is_some() {
+            let scratch = util::local_app_data().unwrap();
+            // What a split path would have pointed at, and a neighbour of the data.
+            let prefix = scratch.parent().unwrap().join("Local A");
+            fs::create_dir_all(&prefix).unwrap();
+            fs::write(prefix.join("keep.txt"), "x").unwrap();
+            let neighbour = scratch.join("other-app");
+            fs::create_dir_all(&neighbour).unwrap();
+            fs::write(neighbour.join("keep.txt"), "x").unwrap();
+            let data = util::data_dir().unwrap();
+            let desktop = user_desktop().unwrap();
+            fs::create_dir_all(&desktop).unwrap();
+            // Shortcut targets expand %VAR%, so the program lives beside the odd path;
+            // only the data directory needs those characters.
+            let destination = scratch
+                .parent()
+                .unwrap()
+                .join("Portable")
+                .join(util::PRODUCT_DIR);
+            // WScript.Shell passes shortcut names through the ANSI code page, so the
+            // Chinese-named link only exists where that code page has those characters
+            // (not on English CI runners).
+            let shortcut = util::powershell(
+                "$n='中文助手'; $e=[Text.Encoding]::Default; $e.GetString($e.GetBytes($n)) -eq $n",
+            )
+            .unwrap()
+                == "True";
+            let config = AssistantConfig {
+                assistant_install_mode: "portable".into(),
+                assistant_path: destination.display().to_string(),
+                create_assistant_shortcut: shortcut,
+                daily_update_check: false,
+                auto_reapply_patch: true,
+            };
+            save_config(config.clone()).unwrap();
+            let operation = OperationState::new();
+            install(config, &operation).unwrap();
+            let target = destination.join(util::EXE_NAME);
+            let assistant_link = desktop.join("Claude Windows 中文助手.lnk");
+            assert!(target.is_file() && assistant_link.is_file() == shortcut);
+
+            // Leftovers the uninstall must remove, beside a junction it must not follow.
+            fs::create_dir_all(data.join("official-msix")).unwrap();
+            fs::write(data.join("official-msix/Claude-1.0.msix"), "x").unwrap();
+            let read_only = data.join("logs").join("read-only.log");
+            fs::create_dir_all(read_only.parent().unwrap()).unwrap();
+            fs::write(&read_only, "x").unwrap();
+            let mut permissions = fs::metadata(&read_only).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&read_only, permissions).unwrap();
+            let outside = scratch.join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("keep.txt"), "x").unwrap();
+            util::powershell(&format!(
+                "New-Item -ItemType Junction -Path {} -Target {} | Out-Null",
+                ps_path(&data.join("linked")),
+                ps_path(&outside)
+            ))
+            .unwrap();
+            let claude_link = desktop.join("Claude Desktop.lnk");
+            util::powershell(&format!(
+                "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath=(Join-Path $env:WINDIR 'explorer.exe'); $s.Arguments={}; $s.IconLocation={}; $s.Save()",
+                ps_path(&claude_link),
+                ps_quote(format!(r"shell:AppsFolder\{}", crate::claude::APP_ID)),
+                ps_quote(format!("{},0", data.join("icons/claude-desktop-app.ico").display())),
+            ))
+            .unwrap();
+            // Records a gated uninstall used to stop for go with everything else.
+            fs::write(data.join("patch-backup.json"), "{}").unwrap();
+            fs::write(data.join("patch-pending.json"), "{}").unwrap();
+
+            uninstall(&operation).unwrap();
+            assert!(!target.exists());
+            assert!(!assistant_link.exists());
+            assert!(!claude_link.exists());
+            assert!(!data.exists());
+            assert!(outside.join("keep.txt").is_file());
+            assert!(prefix.join("keep.txt").is_file());
+            assert!(neighbour.join("keep.txt").is_file());
+            return;
+        }
+        let root = scratch("claude-clean-uninstall");
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "assistant::tests::clean_uninstall_removes_program_entries_and_all_assistant_data",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("LOCALAPPDATA", root.join(LOCAL))
+            .env("CLAUDE_WINDOWS_CN_TEST_DESKTOP", root.join("Desktop"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_elevation_leaves_everything_in_place() {
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_CANCELLED_ELEVATION_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let scratch = util::local_app_data().unwrap();
+            let data = util::data_dir().unwrap();
+            let desktop = user_desktop().unwrap();
+            fs::create_dir_all(&desktop).unwrap();
+            // A system install on record; the test cannot really create one.
+            let destination = scratch.join("Programs").join(util::PRODUCT_DIR);
+            fs::create_dir_all(&destination).unwrap();
+            let target = destination.join(util::EXE_NAME);
+            fs::write(&target, "exe").unwrap();
+            let manifest = InstallManifest {
+                product: "claude-windows-cn".into(),
+                mode: "system".into(),
+                install_path: destination.display().to_string(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            };
+            fs::write(
+                destination.join("install.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            save_installed_record(&manifest).unwrap();
+            let config = data.join("config.json");
+            fs::write(&config, "{}").unwrap();
+            let claude_link = desktop.join("Claude Desktop.lnk");
+            util::powershell(&format!(
+                "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath=(Join-Path $env:WINDIR 'explorer.exe'); $s.Arguments={}; $s.IconLocation={}; $s.Save()",
+                ps_path(&claude_link),
+                ps_quote(format!(r"shell:AppsFolder\{}", crate::claude::APP_ID)),
+                ps_quote(format!("{},0", data.join("icons/claude-desktop-app.ico").display())),
+            ))
+            .unwrap();
+
+            let error = uninstall(&OperationState::new()).err().unwrap();
+            assert!(error.contains("UAC"), "{error}");
+            // Every deletion waits for the approved script, so nothing changed.
+            assert!(target.is_file() && destination.join("install.json").is_file());
+            assert!(installed_record().unwrap().is_some());
+            assert!(config.is_file() && claude_link.is_file());
+            return;
+        }
+        let root = scratch("claude-cancelled-elevation");
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "assistant::tests::cancelled_elevation_leaves_everything_in_place",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("CLAUDE_WINDOWS_CN_TEST_CANCEL_ELEVATION", "1")
+            .env("LOCALAPPDATA", &root)
+            .env("CLAUDE_WINDOWS_CN_TEST_DESKTOP", root.join("Desktop"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cancelled_start_from_the_running_copy_leaves_nothing_behind() {
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_CANCELLED_START_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            // This process is the installed copy, so uninstall must hand over to
+            // a script that runs after it exits; starting that script fails.
+            let source = env::current_exe().unwrap();
+            let destination = source.parent().unwrap();
+            let config = AssistantConfig {
+                assistant_install_mode: "portable".into(),
+                assistant_path: destination.display().to_string(),
+                create_assistant_shortcut: false,
+                daily_update_check: false,
+                auto_reapply_patch: true,
+            };
+            save_config(config.clone()).unwrap();
+            let operation = OperationState::new();
+            install(config, &operation).unwrap();
+            let data = util::data_dir().unwrap();
+            let desktop = user_desktop().unwrap();
+            fs::create_dir_all(&desktop).unwrap();
+            let claude_link = desktop.join("Claude Desktop.lnk");
+            util::powershell(&format!(
+                "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath=(Join-Path $env:WINDIR 'explorer.exe'); $s.Arguments={}; $s.IconLocation={}; $s.Save()",
+                ps_path(&claude_link),
+                ps_quote(format!(r"shell:AppsFolder\{}", crate::claude::APP_ID)),
+                ps_quote(format!("{},0", data.join("icons/claude-desktop-app.ico").display())),
+            ))
+            .unwrap();
+
+            let error = uninstall(&operation).err().unwrap();
+            assert!(error.contains("UAC"), "{error}");
+            assert!(source.is_file() && destination.join("install.json").is_file());
+            assert!(installed_record().unwrap().is_some());
+            assert!(data.join("config.json").is_file() && claude_link.is_file());
+            // No wrapper started, so this process removed its own scripts.
+            let prefix = format!("claude-windows-cn-uninstall-{}-", std::process::id());
+            let left = fs::read_dir(env::temp_dir())
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+                .count();
+            assert_eq!(left, 0);
+            return;
+        }
+        let scratch = scratch("claude-cancelled-start");
+        let portable = scratch.join("Portable");
+        fs::create_dir_all(&portable).unwrap();
+        let child_exe = portable.join(util::EXE_NAME);
+        fs::copy(env::current_exe().unwrap(), &child_exe).unwrap();
+        let output = Command::new(&child_exe)
+            .args([
+                "--exact",
+                "assistant::tests::cancelled_start_from_the_running_copy_leaves_nothing_behind",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("CLAUDE_WINDOWS_CN_TEST_CANCEL_ELEVATION", "1")
+            .env("LOCALAPPDATA", scratch.join("Data"))
+            .env("CLAUDE_WINDOWS_CN_TEST_DESKTOP", scratch.join("Desktop"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(scratch).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]

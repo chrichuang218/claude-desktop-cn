@@ -19,6 +19,22 @@ const RELEASES_URL: &str = "https://downloads.claude.ai/releases/darwin/universa
 const DOWNLOAD_PREFIX: &str = "https://downloads.claude.ai/releases/darwin/universal/";
 const SIGNING_REQUIREMENT: &str =
     "=anchor apple generic and certificate leaf[subject.OU] = \"Q6L2SF6YDW\"";
+const ZIP_DIR: &str = "official-macos";
+const ZIP_PREFIX: &str = "Claude-";
+const ZIP_SUFFIX: &str = ".zip";
+
+/// Startup cleanup of downloads and extraction directories left by earlier versions.
+/// Without online metadata, the newest cached archive is the only one worth keeping.
+pub fn clean_cache(data: &Path) -> Vec<String> {
+    let directory = data.join(ZIP_DIR);
+    let mut errors =
+        util::prune_versioned_downloads(data, &directory, ZIP_PREFIX, ZIP_SUFFIX, None);
+    // Each install removes its own extraction; stale ones were left by a crash.
+    errors.extend(util::remove_entries(data, &directory, |name| {
+        name.starts_with("extract-") && util::is_stale(&directory.join(name))
+    }));
+    errors
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -674,9 +690,10 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
         None if only_update => return Err("尚未安装 Claude Desktop，请先安装。".into()),
         _ => (),
     }
-    let directory = util::data_dir()?.join("official-macos");
+    let data = util::data_dir()?;
+    let directory = data.join(ZIP_DIR);
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let zip = directory.join(format!("Claude-{}.zip", metadata.version));
+    let zip = directory.join(format!("{ZIP_PREFIX}{}{ZIP_SUFFIX}", metadata.version));
     let work = directory.join(format!("extract-{}", nonce()?));
     fs::create_dir(&work).map_err(|error| error.to_string())?;
     let result = (|| {
@@ -705,6 +722,16 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
                 extract_official(&zip, &work, &metadata.version)?
             }
         };
+        // Only the target version can still be installed; older archives just take space.
+        for error in util::prune_versioned_downloads(
+            &data,
+            &directory,
+            ZIP_PREFIX,
+            ZIP_SUFFIX,
+            Some(&metadata.version),
+        ) {
+            operation.log(error);
+        }
         operation.log(format!(
             "官方版本：{}；来源：{}；SHA256：{}",
             metadata.version,
@@ -744,6 +771,38 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
     }
 }
 
+/// Proof that this assistant created the Claude desktop link. Accepting a link
+/// that already pointed at Claude does not make it ours.
+#[derive(Serialize, Deserialize)]
+struct ShortcutRecord {
+    target: PathBuf,
+}
+
+fn shortcut_link() -> Result<PathBuf, String> {
+    Ok(home()?.join("Desktop").join("Claude Desktop.app"))
+}
+
+fn shortcut_record_path() -> Result<PathBuf, String> {
+    Ok(util::data_dir()?.join("claude-shortcut.json"))
+}
+
+/// The Claude desktop link and its target, if this assistant recorded creating
+/// it and it still points there; without that proof the link stays. Uninstall
+/// re-checks both before removing it. It does not query Claude, so a broken
+/// Claude install cannot stop an uninstall.
+pub fn owned_desktop_shortcut() -> Result<Option<(PathBuf, PathBuf)>, String> {
+    let Some(record) = fs::read(shortcut_record_path()?)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ShortcutRecord>(&bytes).ok())
+    else {
+        return Ok(None);
+    };
+    let link = shortcut_link()?;
+    let owned = fs::symlink_metadata(&link).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && fs::read_link(&link).ok().as_ref() == Some(&record.target);
+    Ok(owned.then_some((link, record.target)))
+}
+
 pub fn create_shortcut(operation: &OperationState) -> Result<OperationOutcome, String> {
     let package = query_package()?.ok_or("未安装官方 Claude Desktop，无法创建快捷方式。")?;
     operation.step("创建 Claude Desktop 桌面快捷方式");
@@ -752,7 +811,7 @@ pub fn create_shortcut(operation: &OperationState) -> Result<OperationOutcome, S
     if !desktop.is_dir() {
         return Err("当前用户桌面目录不存在。".into());
     }
-    let link = desktop.join("Claude Desktop.app");
+    let link = shortcut_link()?;
     match fs::symlink_metadata(&link) {
         Ok(metadata)
             if metadata.file_type().is_symlink()
@@ -766,6 +825,22 @@ pub fn create_shortcut(operation: &OperationState) -> Result<OperationOutcome, S
                 .arg("-s")
                 .arg(package.root())
                 .arg(&link))?;
+            // Only a link created here may later be removed on uninstall.
+            let record = ShortcutRecord {
+                target: package.root(),
+            };
+            let saved = shortcut_record_path().and_then(|path| {
+                fs::create_dir_all(path.parent().ok_or("记录路径无效。")?)
+                    .map_err(|e| e.to_string())?;
+                fs::write(
+                    path,
+                    serde_json::to_vec(&record).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())
+            });
+            if let Err(error) = saved {
+                operation.log(format!("未能记录快捷方式归属，卸载助手时将保留它：{error}"));
+            }
         }
         Err(error) => return Err(format!("读取桌面快捷方式失败：{error}")),
     }
