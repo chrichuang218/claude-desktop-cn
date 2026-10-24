@@ -15,7 +15,7 @@ const ENGINE_URL: &str =
     "https://github.com/javaht/claude-desktop-zh-cn/archive/refs/heads/main.zip";
 const ENGINE_DOWNLOAD_URL: &str =
     "https://codeload.github.com/javaht/claude-desktop-zh-cn/zip/refs/heads/main";
-const ENGINE_DIR: &str = "patch-engine";
+pub(crate) const ENGINE_DIR: &str = "patch-engine";
 
 // Reused from claude-desktop-zh: retain its bundle batching and effort-label adaptation.
 const FAST_HARDCODED_FRONTEND_PATCH_FUNCTION: &str = r#"
