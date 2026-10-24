@@ -105,7 +105,10 @@ fn installed_record_path() -> Result<PathBuf, String> {
 }
 
 fn installed_record() -> Result<Option<InstallManifest>, String> {
-    let path = installed_record_path()?;
+    read_installed_record(&installed_record_path()?)
+}
+
+fn read_installed_record(path: &Path) -> Result<Option<InstallManifest>, String> {
     if !path.exists() {
         return Ok(None);
     }
@@ -120,6 +123,154 @@ fn installed_record() -> Result<Option<InstallManifest>, String> {
 
 fn save_installed_record(manifest: &InstallManifest) -> Result<(), String> {
     util::write_json(&installed_record_path()?, manifest)
+}
+
+/// A portable copy takes over the data an earlier version kept in the per-user
+/// directory, unless that data is recorded for another installation. Settings,
+/// records and the engine's run logs are copied; caches are not and download
+/// again. The Claude shortcut follows its icon before the old directory goes.
+/// Any failure leaves the old directory in place.
+pub fn adopt_legacy_data() -> Result<(), String> {
+    let data = util::data_dir()?;
+    let legacy = util::legacy_data_dir()?;
+    // Not portable, or nothing to adopt.
+    if data == legacy || !legacy.is_dir() {
+        return Ok(());
+    }
+    // Links, case and short names let different paths name one place, so
+    // overlap and ownership are judged on the paths they resolve to.
+    let real = |path: &Path| {
+        fs::canonicalize(path).map_err(|error| format!("无法解析 {}：{error}", path.display()))
+    };
+    let root = real(data.parent().ok_or("助手数据目录无效。")?)?;
+    let (data_real, legacy_real) = (real(&data)?, real(&legacy)?);
+    let overlaps = |path: &Path| path.starts_with(&legacy_real) || legacy_real.starts_with(path);
+    // The old directory is this data, holds this copy, or lies inside it.
+    if overlaps(&data_real) || overlaps(&root) {
+        return Ok(());
+    }
+    match read_installed_record(&legacy.join("installed.json")) {
+        // Written by this copy before it was installed in place.
+        Ok(None) => {}
+        Ok(Some(record)) if real(Path::new(&record.install_path)).ok() == Some(root.clone()) => {}
+        // Another installation's, or unreadable: not this copy's to take.
+        _ => return Ok(()),
+    }
+    let engine = Path::new(crate::patch::ENGINE_DIR);
+    let mut entries = [
+        "config.json",
+        "installed.json",
+        "patch-backup.json",
+        "patch-pending.json",
+        "icons/claude-desktop-app.ico",
+    ]
+    .map(PathBuf::from)
+    .to_vec();
+    // Run directories hold the logs an unfinished localization is checked against.
+    match fs::read_dir(legacy.join(engine)) {
+        Ok(runs) => {
+            for run in runs {
+                let name = run.map_err(|error| error.to_string())?.file_name();
+                if name.to_string_lossy().starts_with("run-") {
+                    entries.push(engine.join(name));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "读取 {} 失败：{error}",
+                legacy.join(engine).display()
+            ))
+        }
+    }
+    for entry in entries {
+        adopt_entry(&legacy.join(&entry), &data.join(&entry))?;
+    }
+    util::powershell(&crate::claude::move_desktop_shortcut_icon_script(
+        &user_desktop()?,
+        &legacy.join("icons"),
+        &data.join("icons"),
+    ))?;
+    // remove_dir_all removes a link itself and never follows one.
+    fs::remove_dir_all(&legacy)
+        .map_err(|error| format!("删除旧数据目录 {} 失败：{error}", legacy.display()))
+}
+
+// Copies `from` to `to` through a staging sibling, so an interrupted copy is
+// never taken for a finished one. A `to` already there wins, and links are
+// neither copied nor followed.
+fn adopt_entry(from: &Path, to: &Path) -> Result<(), String> {
+    fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            let (kind, target) = (entry.file_type()?, to.join(entry.file_name()));
+            if kind.is_dir() {
+                copy_tree(&entry.path(), &target)?;
+            } else if kind.is_file() {
+                fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
+    }
+    let failed = |error: std::io::Error| format!("迁移 {} 失败：{error}", from.display());
+    let kind = match fs::symlink_metadata(from) {
+        Ok(metadata) => metadata.file_type(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(failed(error)),
+    };
+    if kind.is_symlink() || to.exists() {
+        return Ok(());
+    }
+    let mut stage = to.as_os_str().to_owned();
+    stage.push(".adopting");
+    let stage = PathBuf::from(stage);
+    // Left by an interrupted attempt.
+    if fs::symlink_metadata(&stage).is_ok() {
+        util::remove_entry(&stage)?;
+    }
+    fs::create_dir_all(to.parent().ok_or("迁移目标无效。")?).map_err(failed)?;
+    let copied = if kind.is_dir() {
+        copy_tree(from, &stage)
+    } else {
+        fs::copy(from, &stage).map(drop)
+    };
+    copied.and_then(|()| fs::rename(&stage, to)).map_err(failed)
+}
+
+/// A portable folder can be moved or copied as a whole. Its records travel
+/// with it but still name the old place, so they are pointed at where this
+/// copy runs now; the settings follow when they named the old place too.
+pub fn follow_moved_portable_folder() -> Result<(), String> {
+    let data = util::data_dir()?;
+    if data == util::legacy_data_dir()? {
+        return Ok(());
+    }
+    let root = data.parent().ok_or("助手数据目录无效。")?;
+    let Some(mut record) = installed_record()? else {
+        return Ok(());
+    };
+    let old = PathBuf::from(&record.install_path);
+    if record.mode != "portable" || old == root {
+        return Ok(());
+    }
+    let manifest_path = root.join("install.json");
+    let raw =
+        fs::read_to_string(&manifest_path).map_err(|error| format!("读取安装记录失败：{error}"))?;
+    let mut manifest: InstallManifest = serde_json::from_str(raw.trim_start_matches('\u{feff}'))
+        .map_err(|error| format!("安装记录格式无效：{error}"))?;
+    manifest.install_path = root.display().to_string();
+    util::write_json(&manifest_path, &manifest)?;
+    let mut config = load_config()?;
+    if config.assistant_install_mode == "portable" && Path::new(&config.assistant_path) == old {
+        config.assistant_path = manifest.install_path.clone();
+        util::write_json(&config_path()?, &config)?;
+    }
+    // Last: until installed.json names this place, the next start redoes
+    // every step, so a failure partway is finished later.
+    record.install_path = manifest.install_path;
+    save_installed_record(&record)
 }
 
 pub fn load_config() -> Result<AssistantConfig, String> {
@@ -439,6 +590,10 @@ if (-not (Test-Path -LiteralPath $target)) {{ throw '助手程序复制失败。
         return Err("助手安装文件摘要与当前程序不一致。".into());
     }
     save_installed_record(&manifest)?;
+    // Installed in place as portable: data now lives beside the program.
+    if let Err(error) = adopt_legacy_data() {
+        operation.log(error);
+    }
     let message = if in_place {
         format!("助手已在 {} 就绪，未复制程序。", destination.display())
     } else {
@@ -454,6 +609,15 @@ if (-not (Test-Path -LiteralPath $target)) {{ throw '助手程序复制失败。
 pub fn uninstall(operation: &OperationState) -> Result<OperationOutcome, String> {
     let record = installed_record()?.ok_or("没有本助手的安装位置记录。")?;
     let path = PathBuf::from(record.install_path);
+    let data = util::data_dir()?;
+    // Data kept beside the program belongs to that copy alone, so a portable
+    // copy only ever uninstalls itself, even while its records name elsewhere.
+    if data != util::legacy_data_dir()? && Some(path.as_path()) != data.parent() {
+        return Err(format!(
+            "安装记录指向 {}，不是当前便携副本所在位置；请重新启动助手后再试。",
+            path.display()
+        ));
+    }
     let manifest =
         read_manifest(&path)?.ok_or_else(|| "当前路径没有本助手的安装记录。".to_string())?;
     if manifest.mode != record.mode {
@@ -462,7 +626,6 @@ pub fn uninstall(operation: &OperationState) -> Result<OperationOutcome, String>
     if !path.join(util::EXE_NAME).is_file() {
         return Err("助手安装文件不存在，已停止卸载。".into());
     }
-    let data = util::data_dir()?;
     // The scripts live outside the data directory, which they remove last.
     let work = env::temp_dir().join(format!(
         "claude-windows-cn-uninstall-{}-{}",
@@ -520,7 +683,6 @@ if ($removeMenu) {{ Remove-Item -LiteralPath $menu -Force -ErrorAction Stop }}
 if ($removeKey) {{ Remove-Item -LiteralPath $key -Force -ErrorAction Stop }}
 Remove-Item -LiteralPath $exe -Force -ErrorAction Stop
 Remove-Item -LiteralPath $manifest -Force -ErrorAction Stop
-if (@(Get-ChildItem -LiteralPath $dest -Force).Count -eq 0) {{ Remove-Item -LiteralPath $dest -Force -ErrorAction Stop }}
 # 3. The whole data directory. A moved one is emptied and only its link goes.
 $data={data}
 if (Test-Path -LiteralPath $data) {{
@@ -529,6 +691,8 @@ if (Test-Path -LiteralPath $data) {{
         Remove-AssistantEntry $data
     }} catch {{ throw ('助手程序已卸载，但助手数据未能完全删除，可手动删除：' + $data + '。' + $_.Exception.Message) }}
 }}
+# 4. The program directory once empty; a portable copy kept its data inside.
+if (@(Get-ChildItem -LiteralPath $dest -Force).Count -eq 0) {{ Remove-Item -LiteralPath $dest -Force -ErrorAction Stop }}
 "#,
         dest = ps_path(&path),
         exe = ps_quote(util::EXE_NAME),
@@ -978,6 +1142,373 @@ mod tests {
         fs::remove_dir_all(scratch).unwrap();
     }
 
+    // Runs `name` again in a copy of this test binary placed in `portable` with
+    // its own install.json, `local` as LOCALAPPDATA and a desktop beside it.
+    #[cfg(windows)]
+    fn run_as_portable_copy(name: &str, child: &str, portable: &Path, local: &Path) {
+        fs::create_dir_all(portable).unwrap();
+        let child_exe = portable.join(util::EXE_NAME);
+        fs::copy(env::current_exe().unwrap(), &child_exe).unwrap();
+        let manifest = InstallManifest {
+            product: "claude-windows-cn".into(),
+            mode: "portable".into(),
+            install_path: portable.display().to_string(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        };
+        fs::write(
+            portable.join("install.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(&child_exe)
+            .args([
+                &format!("assistant::tests::{name}"),
+                "--exact",
+                "--nocapture",
+            ])
+            .env(child, "1")
+            .env("LOCALAPPDATA", local)
+            .env(
+                "CLAUDE_WINDOWS_CN_TEST_DESKTOP",
+                local.parent().unwrap().join("Desktop"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // A program that just exited, or a scanner looking at it, can hold its file
+    // for a moment.
+    #[cfg(windows)]
+    fn remove_scratch(path: &Path) {
+        for _ in 0..50 {
+            if fs::remove_dir_all(path).is_ok() || !path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &Path) {
+        util::powershell(&format!(
+            "New-Item -ItemType Junction -Path {} -Target {} | Out-Null",
+            ps_path(link),
+            ps_path(target)
+        ))
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    fn claude_shortcut_with_icon(link: &Path, icon: &Path) {
+        util::powershell(&format!(
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.TargetPath=(Join-Path $env:WINDIR 'explorer.exe'); $s.Arguments={}; $s.IconLocation={}; $s.Save()",
+            ps_path(link),
+            ps_quote(format!(r"shell:AppsFolder\{}", crate::claude::APP_ID)),
+            ps_quote(format!("{},0", icon.display())),
+        ))
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn portable_copy_adopts_only_its_own_per_user_data() {
+        const NAME: &str = "portable_copy_adopts_only_its_own_per_user_data";
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_ADOPT_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let root = env::current_exe().unwrap().parent().unwrap().to_path_buf();
+            let data = util::data_dir().unwrap();
+            assert_eq!(data, root.join("data"));
+            let legacy = util::legacy_data_dir().unwrap();
+            let record = |install_path: &Path| {
+                serde_json::to_vec(&InstallManifest {
+                    product: "claude-windows-cn".into(),
+                    mode: "portable".into(),
+                    install_path: install_path.display().to_string(),
+                    version: "0.2.5".into(),
+                })
+                .unwrap()
+            };
+            let fill = |install_path: &Path| {
+                for dir in [
+                    "official-msix",
+                    "icons",
+                    "patch-engine/cache",
+                    "patch-engine/run-1-2",
+                ] {
+                    fs::create_dir_all(legacy.join(dir)).unwrap();
+                }
+                fs::write(legacy.join("installed.json"), record(install_path)).unwrap();
+                for (name, content) in [
+                    ("config.json", "{}"),
+                    ("patch-backup.json", "{}"),
+                    ("patch-pending.json", "{}"),
+                    ("patch-engine/run-1-2/engine.log", "log"),
+                    ("patch-engine/cache/engine.zip", "zip"),
+                    ("official-msix/Claude-1.0.msix", "msix"),
+                    ("icons/claude-desktop-app.ico", "ico"),
+                ] {
+                    fs::write(legacy.join(name), content).unwrap();
+                }
+            };
+
+            // Recorded for another installation: neither copied nor removed.
+            fill(&root.parent().unwrap().join("Elsewhere"));
+            adopt_legacy_data().unwrap();
+            assert!(legacy.join("config.json").is_file());
+            assert!(!data.join("config.json").exists());
+            fs::remove_dir_all(&legacy).unwrap();
+
+            // An earlier version of this copy, recorded in another case: records
+            // and run logs move, caches do not, the Claude shortcut follows its
+            // icon, and the old directory goes.
+            fill(&PathBuf::from(root.display().to_string().to_uppercase()));
+            // A copy cut short last time is redone; a record already here stays.
+            fs::write(data.join("config.json.adopting"), "{").unwrap();
+            fs::write(data.join("patch-backup.json"), "kept").unwrap();
+            let desktop = user_desktop().unwrap();
+            fs::create_dir_all(&desktop).unwrap();
+            let claude_link = desktop.join("Claude Desktop.lnk");
+            claude_shortcut_with_icon(&claude_link, &legacy.join("icons/claude-desktop-app.ico"));
+            adopt_legacy_data().unwrap();
+            for name in [
+                "config.json",
+                "installed.json",
+                "patch-pending.json",
+                "patch-engine/run-1-2/engine.log",
+                "icons/claude-desktop-app.ico",
+            ] {
+                assert!(data.join(name).is_file(), "{name}");
+            }
+            assert_eq!(fs::read_to_string(data.join("config.json")).unwrap(), "{}");
+            assert!(!data.join("config.json.adopting").exists());
+            assert_eq!(
+                fs::read_to_string(data.join("patch-backup.json")).unwrap(),
+                "kept"
+            );
+            assert!(!data.join("official-msix").exists());
+            assert!(!data.join("patch-engine/cache").exists());
+            assert!(!legacy.exists());
+            let icon = util::powershell(&format!(
+                "(New-Object -ComObject WScript.Shell).CreateShortcut({}).IconLocation",
+                ps_path(&claude_link)
+            ))
+            .unwrap();
+            assert_eq!(
+                icon.replace('/', "\\"),
+                format!(
+                    "{},0",
+                    data.join("icons").join("claude-desktop-app.ico").display()
+                )
+            );
+            // Nothing left to adopt is fine.
+            adopt_legacy_data().unwrap();
+            return;
+        }
+        let scratch = scratch(NAME);
+        run_as_portable_copy(
+            NAME,
+            CHILD,
+            &scratch.join("Portable"),
+            &scratch.join("Local"),
+        );
+        remove_scratch(&scratch);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn adoption_never_deletes_what_another_path_leads_back_to() {
+        const NAME: &str = "adoption_never_deletes_what_another_path_leads_back_to";
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_ADOPT_ALIAS_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            // Nothing is recorded for another installation, so only the overlap
+            // check stands between this copy and the old directory.
+            let legacy = util::legacy_data_dir().unwrap();
+            adopt_legacy_data().unwrap();
+            assert!(legacy.join("config.json").is_file());
+            return;
+        }
+        for case in 0..3 {
+            let scratch = scratch(NAME);
+            let local = scratch.join("Local");
+            let legacy = local.join(util::PRODUCT_DIR);
+            fs::create_dir_all(&legacy).unwrap();
+            fs::write(legacy.join("config.json"), "{}").unwrap();
+            let (portable, local) = match case {
+                // This copy's data is a junction to the old directory.
+                0 => {
+                    let portable = scratch.join("Portable");
+                    fs::create_dir_all(&portable).unwrap();
+                    junction(&portable.join("data"), &legacy);
+                    (portable, local)
+                }
+                // This copy lives in the old directory, reached through a junction.
+                1 => {
+                    junction(&scratch.join("Alias"), &legacy);
+                    (scratch.join("Alias").join("Portable"), local)
+                }
+                // This copy lives in the old directory, named in another case.
+                _ => (legacy.join("Portable"), scratch.join("LOCAL")),
+            };
+            run_as_portable_copy(NAME, CHILD, &portable, &local);
+            assert!(legacy.join("config.json").is_file(), "case {case}");
+            remove_scratch(&scratch);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn portable_copy_falls_back_when_its_data_refuses_new_files() {
+        const NAME: &str = "portable_copy_falls_back_when_its_data_refuses_new_files";
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_PORTABLE_FALLBACK_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let root = env::current_exe().unwrap().parent().unwrap().to_path_buf();
+            let legacy = util::legacy_data_dir().unwrap();
+            assert_eq!(util::data_dir().unwrap(), legacy);
+            // Settings and adoption keep to that one place.
+            let mut config = load_config().unwrap();
+            config.assistant_install_mode = "portable".into();
+            config.assistant_path = root.display().to_string();
+            config.daily_update_check = false;
+            save_config(config).unwrap();
+            adopt_legacy_data().unwrap();
+            assert!(legacy.join("config.json").is_file());
+            assert!(!root.join("data/config.json").exists());
+            return;
+        }
+        let scratch = scratch(NAME);
+        let portable = scratch.join("Portable");
+        let data = portable.join("data");
+        fs::create_dir_all(&data).unwrap();
+        // Refuses new files and folders, which the ReadOnly attribute would not.
+        let (sid, _) = util::caller_identity().unwrap();
+        let icacls = |args: [&str; 2]| {
+            let output = Command::new("icacls")
+                .arg(&data)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        };
+        icacls(["/deny", &format!("*{sid}:(WD,AD)")]);
+        let outcome = std::panic::catch_unwind(|| {
+            run_as_portable_copy(NAME, CHILD, &portable, &scratch.join("Local"))
+        });
+        icacls(["/remove:d", &format!("*{sid}")]);
+        outcome.unwrap();
+        remove_scratch(&scratch);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn moved_portable_copy_installs_and_uninstalls_in_its_new_folder() {
+        const NAME: &str = "moved_portable_copy_installs_and_uninstalls_in_its_new_folder";
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_PORTABLE_UNINSTALL_TEST_CHILD";
+        if env::var_os(CHILD).is_some() {
+            let root = env::current_exe().unwrap().parent().unwrap().to_path_buf();
+            // The records and settings the folder carried from before the move.
+            let old = root.with_file_name("Old");
+            let record = InstallManifest {
+                product: "claude-windows-cn".into(),
+                mode: "portable".into(),
+                install_path: old.display().to_string(),
+                version: env!("CARGO_PKG_VERSION").into(),
+            };
+            fs::write(
+                root.join("install.json"),
+                serde_json::to_vec(&record).unwrap(),
+            )
+            .unwrap();
+            save_installed_record(&record).unwrap();
+            let carried = AssistantConfig {
+                assistant_install_mode: "portable".into(),
+                assistant_path: old.display().to_string(),
+                create_assistant_shortcut: false,
+                daily_update_check: false,
+                auto_reapply_patch: true,
+            };
+            util::write_json(&config_path().unwrap(), &carried).unwrap();
+            let recorded = || {
+                read_installed_record(&installed_record_path().unwrap())
+                    .unwrap()
+                    .unwrap()
+                    .install_path
+            };
+
+            // The settings cannot be read the first time, as when another
+            // program holds them open.
+            use std::os::windows::fs::OpenOptionsExt;
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(config_path().unwrap())
+                .unwrap();
+            let error = follow_moved_portable_folder().unwrap_err();
+            assert!(error.contains("读取助手设置失败"), "{error}");
+            // Not finished, so the next start redoes it; meanwhile nothing acts
+            // on the copy still in the old folder.
+            assert_eq!(recorded(), old.display().to_string());
+            let refused = uninstall(&OperationState::new()).err().unwrap();
+            assert!(refused.contains("不是当前便携副本"), "{refused}");
+            drop(lock);
+
+            follow_moved_portable_folder().unwrap();
+            assert_eq!(recorded(), root.display().to_string());
+            assert!(read_manifest(&root).unwrap().is_some());
+            let current = status().unwrap();
+            assert!(current.installed);
+            assert_eq!(current.install_path, root.display().to_string());
+            let config = load_config().unwrap();
+            assert_eq!(config.assistant_path, root.display().to_string());
+            install(config, &OperationState::new()).unwrap();
+            fs::create_dir_all(root.join("data/official-msix")).unwrap();
+            fs::write(root.join("data/official-msix/Claude-1.0.msix"), "msix").unwrap();
+            // This process is the installed copy: a script finishes after it exits.
+            let outcome = uninstall(&OperationState::new());
+            assert!(outcome.is_ok(), "{:?}", outcome.err());
+            return;
+        }
+        let scratch = scratch(NAME);
+        // A copy left in the old folder, as when the folder was copied rather
+        // than moved, is not this one's to remove.
+        let old = scratch.join("Old");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join(util::EXE_NAME), "another copy").unwrap();
+        let old_manifest = serde_json::to_vec(&InstallManifest {
+            product: "claude-windows-cn".into(),
+            mode: "portable".into(),
+            install_path: old.display().to_string(),
+            version: env!("CARGO_PKG_VERSION").into(),
+        })
+        .unwrap();
+        fs::write(old.join("install.json"), &old_manifest).unwrap();
+        let portable = scratch.join("Portable");
+        run_as_portable_copy(NAME, CHILD, &portable, &scratch.join("Local"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while portable.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        // Program, install.json and the data inside, then the emptied folder.
+        assert!(
+            !portable.exists(),
+            "{:?}",
+            fs::read_dir(&portable).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+        );
+        assert_eq!(fs::read(old.join(util::EXE_NAME)).unwrap(), b"another copy");
+        assert_eq!(fs::read(old.join("install.json")).unwrap(), old_manifest);
+        remove_scratch(&scratch);
+    }
+
     #[cfg(windows)]
     #[test]
     fn portable_in_place_does_not_copy_executable() {
@@ -1007,15 +1538,19 @@ mod tests {
                 status().unwrap().install_path,
                 destination.display().to_string()
             );
-            let entries = fs::read_dir(destination)
+            let mut entries = fs::read_dir(destination)
                 .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-            assert_eq!(
-                entries.len(),
-                2,
-                "Only the original EXE and install.json should exist"
-            );
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            entries.sort();
+            // The original EXE, install.json, and the data kept beside them.
+            assert_eq!(entries, [util::EXE_NAME, "data", "install.json"]);
+            // Settings saved before installing in place moved into that data,
+            // and the per-user directory used until then is gone.
+            assert_eq!(util::data_dir().unwrap(), destination.join("data"));
+            assert!(destination.join("data/config.json").is_file());
+            assert!(destination.join("data/installed.json").is_file());
+            assert!(!util::legacy_data_dir().unwrap().exists());
             return;
         }
         let scratch = env::temp_dir().join(format!(

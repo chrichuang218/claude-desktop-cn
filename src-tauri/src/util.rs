@@ -15,8 +15,52 @@ pub const PRODUCT_DIR: &str = "ClaudeWindowsCN";
 pub const EXE_NAME: &str = "claude-windows-cn.exe";
 const HELPER_FLAG: &str = "--run-assistant-helper";
 
+/// Where the assistant keeps its data: next to the program for a portable copy,
+/// otherwise the per-user directory.
 pub fn data_dir() -> Result<PathBuf, String> {
+    match portable_data_dir() {
+        Some(dir) => Ok(dir),
+        None => legacy_data_dir(),
+    }
+}
+
+/// The per-user directory, which every copy used before portable data existed.
+pub fn legacy_data_dir() -> Result<PathBuf, String> {
     Ok(local_app_data()?.join(PRODUCT_DIR))
+}
+
+/// A portable copy keeps its data in `data` beside the program once its own
+/// install.json says it is portable; a fresh download uses the per-user
+/// directory until installed in place. Once its install.json decides, the
+/// answer holds for the process, and a location where no file can be created,
+/// such as read-only media, falls back to the per-user directory.
+fn portable_data_dir() -> Option<PathBuf> {
+    static DECIDED: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    if let Some(decided) = DECIDED.get() {
+        return decided.clone();
+    }
+    let root = env::current_exe().ok()?.parent()?.to_path_buf();
+    let portable = portable_install(&root)?;
+    let decided = portable.then(|| root.join("data")).filter(|data| {
+        // An existing directory can still refuse new files, so try one.
+        let probe = data.join(format!(".write-test-{}", std::process::id()));
+        let writable = fs::create_dir_all(data)
+            .and_then(|()| fs::write(&probe, b""))
+            .is_ok();
+        let _ = fs::remove_file(&probe);
+        writable
+    });
+    DECIDED.get_or_init(|| decided).clone()
+}
+
+/// Whether the install.json in `root` belongs to this assistant and says
+/// portable; `None` while there is no readable install.json to decide by.
+fn portable_install(root: &Path) -> Option<bool> {
+    let raw = fs::read_to_string(root.join("install.json")).ok()?;
+    let value =
+        serde_json::from_str::<serde_json::Value>(raw.trim_start_matches('\u{feff}')).ok()?;
+    let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
+    Some(field("product") == Some("claude-windows-cn") && field("mode") == Some("portable"))
 }
 
 pub fn local_app_data() -> Result<PathBuf, String> {
@@ -252,6 +296,45 @@ fn run_script_to_log(script: &Path, log_path: &Path) -> Result<String, String> {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_this_assistant_s_portable_install_json_selects_portable_data() {
+        let root = env::temp_dir().join(format!(
+            "claude-portable-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        // Undecided until an install.json exists, e.g. a fresh download.
+        assert_eq!(portable_install(&root), None);
+        let manifest = root.join("install.json");
+        for (content, expected) in [
+            (
+                r#"{"product":"claude-windows-cn","mode":"portable"}"#,
+                Some(true),
+            ),
+            (
+                "\u{feff}{\"product\":\"claude-windows-cn\",\"mode\":\"portable\"}",
+                Some(true),
+            ),
+            (
+                r#"{"product":"claude-windows-cn","mode":"user"}"#,
+                Some(false),
+            ),
+            (
+                r#"{"product":"another-tool","mode":"portable"}"#,
+                Some(false),
+            ),
+            ("not json", None),
+        ] {
+            fs::write(&manifest, content).unwrap();
+            assert_eq!(portable_install(&root), expected, "{content}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn windows_powershell_launchers_load_native_security_module() {

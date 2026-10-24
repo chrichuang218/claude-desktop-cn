@@ -185,12 +185,26 @@ fn clean_caches() {
     let Ok(data) = util::data_dir() else {
         return;
     };
-    let errors = [
-        claude::clean_cache(&data),
-        patch::clean_cache(&data),
-        self_update::clean_cache(&data),
-    ]
-    .concat();
+    let mut errors = Vec::new();
+    // A portable copy first takes over what an earlier version kept per user,
+    // and follows its folder if that was moved.
+    #[cfg(target_os = "windows")]
+    errors.extend(
+        [
+            assistant::adopt_legacy_data(),
+            assistant::follow_moved_portable_folder(),
+        ]
+        .into_iter()
+        .filter_map(Result::err),
+    );
+    errors.extend(
+        [
+            claude::clean_cache(&data),
+            patch::clean_cache(&data),
+            self_update::clean_cache(&data),
+        ]
+        .concat(),
+    );
     util::record_cleanup_errors(&data, &errors);
 }
 

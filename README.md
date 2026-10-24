@@ -52,7 +52,7 @@
 ## 快速上手
 
 1. 前往 [最新 Release](https://github.com/chrichuang218/claude-desktop-cn/releases/latest)，按下表下载适合系统和芯片架构的包。macOS 附件为预览版；各包均配套同名 `.sha256` 摘要。
-2. 启动助手，选择安装方式和位置。一般选 **用户安装**；**便携方式**默认在当前 EXE 或 `.app` 所在目录使用，不再复制程序。选择其他位置或用户/系统安装时，会保留原始下载文件；安装完成并退出后可删除原始文件，今后使用安装目录中的程序或快捷方式。macOS 用户安装默认为 `~/Applications`，系统安装默认为 `/Applications`，安装目录内的应用名称为 `Claude 中文助手.app`。
+2. 启动助手，选择安装方式和位置。一般选 **用户安装**；**便携方式**默认在当前 EXE 或 `.app` 所在目录使用，不再复制程序；Windows 便携版的设置、缓存和日志保存在程序目录下的 `data` 文件夹，整个文件夹可以移动；从旧版升级时会自动接管原 `%LOCALAPPDATA%\ClaudeWindowsCN` 中属于它的设置、汉化记录和日志（缓存不迁移，需要时重新下载），并删除旧目录。选择其他位置或用户/系统安装时，会保留原始下载文件；安装完成并退出后可删除原始文件，今后使用安装目录中的程序或快捷方式。macOS 用户安装默认为 `~/Applications`，系统安装默认为 `/Applications`，安装目录内的应用名称为 `Claude 中文助手.app`。
 3. 在 **概览** 查看 Claude Desktop 状态。已安装则直接使用；未安装可通过助手下载安装。
 4. 进入 **汉化**，点击 **应用汉化** 并确认。需要恢复时，点击 **恢复原样**。
 
@@ -104,7 +104,7 @@ macOS 的汉化和恢复还需要 **Python 3.9 或更新版本**，可通过 [py
 
 新版在提权和目标权限检查通过后、开始运行汉化引擎前才写入未完成记录；取消 UAC 或权限准备失败后可直接重试。已经开始修改文件的失败仍会验证回滚，无法证明安全恢复时保留记录。
 
-对于 v0.2.1 遗留的阻断，助手数据目录是 `%LOCALAPPDATA%\ClaudeWindowsCN`，不是程序安装目录 `%LOCALAPPDATA%\Programs\ClaudeWindowsCN`。先退出助手并保留 `patch-pending.json`、`patch-engine` 中对应操作的日志，以及 Claude 安装目录下 `app\resources\.zh-cn-backups` 中的备份。
+对于 v0.2.1 遗留的阻断，助手数据目录是 `%LOCALAPPDATA%\ClaudeWindowsCN`（Windows 便携版为程序目录下的 `data` 文件夹），不是程序安装目录 `%LOCALAPPDATA%\Programs\ClaudeWindowsCN`。先退出助手并保留 `patch-pending.json`、`patch-engine` 中对应操作的日志，以及 Claude 安装目录下 `app\resources\.zh-cn-backups` 中的备份。
 
 仅当对应日志明确表明失败发生在 UAC 启动、包身份检查或取得/设置写权限阶段，且汉化引擎尚未执行时，才将 `patch-pending.json` 重命名为 `patch-pending.json.bak`，再启动新版重试。不能仅凭“没有备份目录”判断未修改文件；日志缺失或引擎已执行时，请提交日志核查，不要删除整个助手数据目录或原始文件备份。新版汉化页会显示实际记录和备份位置。
 

@@ -807,11 +807,37 @@ fn verify_official_executable(package: &ClaudePackage) -> Result<(), String> {
 /// Removes only the Claude shortcut this assistant made: it still opens the
 /// official app and its icon is the copy kept under the assistant's `icons`.
 pub(crate) fn remove_desktop_shortcut_script(desktop: &Path, icons: &Path) -> String {
+    owned_desktop_shortcut_script(
+        desktop,
+        icons,
+        "Remove-Item -LiteralPath $claudeLink -Force -ErrorAction Stop",
+    )
+}
+
+/// Points the Claude shortcut this assistant made at its icon's new place when
+/// the data directory moves from `old_icons` to `new_icons`.
+pub(crate) fn move_desktop_shortcut_icon_script(
+    desktop: &Path,
+    old_icons: &Path,
+    new_icons: &Path,
+) -> String {
+    owned_desktop_shortcut_script(
+        desktop,
+        old_icons,
+        &format!(
+            "$claudeShortcut.IconLocation=(Join-Path {} $claudeIcon.Substring($claudeIcons.Length)) + ',0'; $claudeShortcut.Save()",
+            ps_path(new_icons)
+        ),
+    )
+}
+
+// Runs `action` only on the Claude shortcut this assistant made. A shortcut
+// that cannot be read gives no proof of ownership and is left alone.
+fn owned_desktop_shortcut_script(desktop: &Path, icons: &Path, action: &str) -> String {
     format!(
         r#"$ErrorActionPreference='Stop'
 $claudeLink=Join-Path {desktop} 'Claude Desktop.lnk'
 if (Test-Path -LiteralPath $claudeLink) {{
-    # A shortcut that cannot be read gives no proof of ownership and stays.
     $claudeOwned=$false
     try {{
         $claudeShortcut=(New-Object -ComObject WScript.Shell).CreateShortcut($claudeLink)
@@ -820,7 +846,7 @@ if (Test-Path -LiteralPath $claudeLink) {{
         $claudeIcons=({icons} -replace '/','\').TrimEnd('\') + '\'
         $claudeOwned=$claudeShortcut.TargetPath -eq (Join-Path $env:WINDIR 'explorer.exe') -and $claudeShortcut.Arguments -eq {args} -and $claudeIcon.StartsWith($claudeIcons, [StringComparison]::OrdinalIgnoreCase)
     }} catch {{ }}
-    if ($claudeOwned) {{ Remove-Item -LiteralPath $claudeLink -Force -ErrorAction Stop }}
+    if ($claudeOwned) {{ {action} }}
 }}
 "#,
         desktop = ps_path(desktop),
