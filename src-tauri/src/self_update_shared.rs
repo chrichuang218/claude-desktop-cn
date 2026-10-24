@@ -183,6 +183,32 @@ mod repository_tests {
     }
 
     #[test]
+    fn background_checks_skip_fresh_results_and_retry_failures_sooner() {
+        let cached = |checked: u64, error: Option<&str>| CachedUpdate {
+            checked_at: checked.to_string(),
+            update_available: error.is_none().then_some(false),
+            latest_version: None,
+            error: error.map(Into::into),
+            release_notes: None,
+        };
+        let now = 1_000_000;
+        let startup = STARTUP_CHECK_INTERVAL;
+        assert!(check_due(None, now, startup));
+        assert!(!check_due(Some(&cached(now - startup + 60, None)), now, startup));
+        assert!(check_due(Some(&cached(now - startup, None)), now, startup));
+        // Stale for a new launch, still fresh for the running schedule.
+        assert!(!check_due(Some(&cached(now - 2 * startup, None)), now, DAILY_CHECK_INTERVAL));
+        assert!(check_due(Some(&cached(now - DAILY_CHECK_INTERVAL, None)), now, DAILY_CHECK_INTERVAL));
+        let offline = Some("network unavailable");
+        assert!(!check_due(Some(&cached(now - 60, offline)), now, startup));
+        assert!(check_due(Some(&cached(now - FAILED_CHECK_RETRY, offline)), now, DAILY_CHECK_INTERVAL));
+        // The clock moved back, or the record is unreadable.
+        assert!(check_due(Some(&cached(now + 60, None)), now, DAILY_CHECK_INTERVAL));
+        let unreadable = CachedUpdate { checked_at: "later".into(), ..cached(now, None) };
+        assert!(check_due(Some(&unreadable), now, DAILY_CHECK_INTERVAL));
+    }
+
+    #[test]
     fn cached_assistant_flag_follows_the_running_version() {
         let cached = |latest: &str| CachedUpdate {
             checked_at: "1".into(),
@@ -468,44 +494,136 @@ fn now_string() -> String {
     now_epoch().to_string()
 }
 
-pub fn start_daily_scheduler() {
-    thread::spawn(|| loop {
-        if let Ok(config) = crate::assistant::load_config() {
-            if config.daily_update_check {
-                let _ = daily_check_if_due();
-            }
-        }
-        thread::sleep(Duration::from_secs(60 * 60));
-    });
+// Each launch looks again once a result is an hour old, so reopening the
+// assistant shows fresh versions without querying GitHub on every start; while
+// it keeps running, once a day. A failed check is retried sooner.
+const STARTUP_CHECK_INTERVAL: u64 = 60 * 60;
+const DAILY_CHECK_INTERVAL: u64 = 24 * 60 * 60;
+const FAILED_CHECK_RETRY: u64 = 10 * 60;
+/// The front end shows "started" items as checking and refreshes its status on "finished".
+const UPDATE_CHECK_EVENT: &str = "update-check";
+
+static UPDATE_CHECK_RUNNING: AtomicBool = AtomicBool::new(false);
+static CLAUDE_CHECKING: AtomicBool = AtomicBool::new(false);
+static ASSISTANT_CHECKING: AtomicBool = AtomicBool::new(false);
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+#[derive(Clone, Serialize)]
+struct UpdateCheckEvent {
+    phase: &'static str,
+    claude: bool,
+    assistant: bool,
 }
 
-pub fn trigger_daily_check() {
+pub fn start_update_scheduler(app: tauri::AppHandle) {
+    let _ = APP.set(app);
     thread::spawn(|| {
-        let _ = daily_check_if_due();
+        let mut interval = STARTUP_CHECK_INTERVAL;
+        loop {
+            if let Ok(config) = crate::assistant::load_config() {
+                if config.daily_update_check {
+                    let _ = check_if_due(interval);
+                }
+            }
+            interval = DAILY_CHECK_INTERVAL;
+            thread::sleep(Duration::from_secs(60 * 60));
+        }
     });
 }
 
-fn daily_check_if_due() -> Result<(), String> {
-    let previous_claude = {
-        let _guard = CACHE_LOCK.lock().map_err(|error| error.to_string())?;
-        let cache = read_cache()?;
-        if now_epoch().saturating_sub(cache.checked_epoch) < 24 * 60 * 60 {
-            return Ok(());
-        }
-        cache.claude
+/// Runs when automatic checks are switched back on.
+pub fn trigger_update_check() {
+    thread::spawn(|| {
+        let _ = check_if_due(STARTUP_CHECK_INTERVAL);
+    });
+}
+
+pub fn claude_update_checking() -> bool {
+    CLAUDE_CHECKING.load(SeqCst)
+}
+
+pub fn assistant_update_checking() -> bool {
+    ASSISTANT_CHECKING.load(SeqCst)
+}
+
+fn notify_update_check(phase: &'static str, claude: bool, assistant: bool) {
+    use tauri::Emitter;
+    if let Some(app) = APP.get() {
+        let _ = app.emit(
+            UPDATE_CHECK_EVENT,
+            UpdateCheckEvent {
+                phase,
+                claude,
+                assistant,
+            },
+        );
+    }
+}
+
+/// Whether a cached result is old enough to query again. A record from the
+/// future means the clock moved back, so it is not trusted either.
+fn check_due(cached: Option<&CachedUpdate>, now: u64, interval: u64) -> bool {
+    let Some(checked) = cached.and_then(|value| value.checked_at.parse::<u64>().ok()) else {
+        return true;
     };
-    let assistant = Some(assistant_check_cache(&latest_release()));
-    let claude = Some(claude_check_cache(&claude::daily_update_info()));
-    let _guard = CACHE_LOCK.lock().map_err(|error| error.to_string())?;
-    let mut cache = read_cache()?;
-    if now_epoch().saturating_sub(cache.checked_epoch) < 24 * 60 * 60 {
+    let interval = if cached.is_some_and(|value| value.error.is_some()) {
+        interval.min(FAILED_CHECK_RETRY)
+    } else {
+        interval
+    };
+    checked > now || now - checked >= interval
+}
+
+// Clears the flags on every exit path, only after the results are saved, so a
+// status read never pairs "not checking" with the previous result. "finished"
+// is sent even when nothing was due.
+struct CheckRun;
+
+impl Drop for CheckRun {
+    fn drop(&mut self) {
+        CLAUDE_CHECKING.store(false, SeqCst);
+        ASSISTANT_CHECKING.store(false, SeqCst);
+        UPDATE_CHECK_RUNNING.store(false, SeqCst);
+        notify_update_check("finished", false, false);
+    }
+}
+
+fn check_if_due(interval: u64) -> Result<(), String> {
+    // A check arriving while another runs relies on that one's result.
+    if UPDATE_CHECK_RUNNING
+        .compare_exchange(false, true, SeqCst, SeqCst)
+        .is_err()
+    {
         return Ok(());
     }
-    cache.assistant = assistant;
-    // A manual check may finish while the daily network requests are pending.
-    if cache.claude == previous_claude {
-        cache.claude = claude;
+    let _run = CheckRun;
+    let (previous_assistant, previous_claude) = {
+        let _guard = CACHE_LOCK.lock().map_err(|error| error.to_string())?;
+        let cache = read_cache()?;
+        (cache.assistant, cache.claude)
+    };
+    let now = now_epoch();
+    let assistant_due = check_due(previous_assistant.as_ref(), now, interval);
+    let claude_due = check_due(previous_claude.as_ref(), now, interval);
+    if !assistant_due && !claude_due {
+        return Ok(());
     }
+    // Only the items actually queried show as checking.
+    CLAUDE_CHECKING.store(claude_due, SeqCst);
+    ASSISTANT_CHECKING.store(assistant_due, SeqCst);
+    notify_update_check("started", claude_due, assistant_due);
+    let assistant = assistant_due.then(|| assistant_check_cache(&latest_release()));
+    let claude = claude_due.then(|| claude_check_cache(&claude::daily_update_info()));
+    let _guard = CACHE_LOCK.lock().map_err(|error| error.to_string())?;
+    let mut cache = read_cache()?;
+    // A manual check may finish while these requests are pending; keep its result.
+    if let Some(update) = assistant.filter(|_| cache.assistant == previous_assistant) {
+        cache.assistant = Some(update);
+    }
+    if let Some(update) = claude.filter(|_| cache.claude == previous_claude) {
+        cache.claude = Some(update);
+    }
+    // Older builds still schedule from this field, so keep it current.
     cache.checked_epoch = now_epoch();
     write_cache(&cache)
 }
