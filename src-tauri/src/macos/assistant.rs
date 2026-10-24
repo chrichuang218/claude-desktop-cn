@@ -50,6 +50,8 @@ pub struct AssistantStatus {
     pub latest_version: Option<String>,
     pub update_check_error: Option<String>,
     pub last_update_check: Option<String>,
+    /// A background check of the assistant's own version is running.
+    pub update_checking: bool,
     pub release_notes: Option<String>,
     pub update_result: Option<String>,
     pub update_result_ok: Option<bool>,
@@ -159,7 +161,7 @@ pub fn save_config(config: AssistantConfig) -> Result<AssistantConfig, String> {
         .unwrap_or(false);
     write_json(&config_path()?, &config)?;
     if config.daily_update_check && !was_enabled {
-        crate::self_update::trigger_daily_check();
+        crate::self_update::trigger_update_check();
     }
     Ok(config)
 }
@@ -288,6 +290,7 @@ pub fn status() -> Result<AssistantStatus, String> {
             .as_ref()
             .and_then(|value| value.release_notes.clone()),
         last_update_check: cached.map(|value| value.checked_at),
+        update_checking: crate::self_update::assistant_update_checking(),
         update_result: result.as_ref().map(|value| value.message.clone()),
         update_result_ok: result.map(|value| value.ok),
         uninstall_result: uninstall.as_ref().map(|value| value.message.clone()),

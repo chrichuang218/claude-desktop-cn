@@ -225,19 +225,20 @@ pub fn run() {
     }
 
     clean_caches();
-    self_update::start_daily_scheduler();
     let mut context = app_context();
     // Tauri decodes only the first ICO frame (16px); do not upscale it for the taskbar.
     context.set_default_window_icon(Some(tauri::include_image!("icons/128x128@2x.png")));
     tauri::Builder::default()
-        .setup(|_app| {
+        .setup(|app| {
             #[cfg(target_os = "windows")]
             set_windows_taskbar_icon(
-                _app.get_webview_window("main")
+                app.get_webview_window("main")
                     .ok_or("助手主窗口不存在。")?
                     .hwnd()?
                     .0,
             )?;
+            // Started here so background checks can tell the window when they finish.
+            self_update::start_update_scheduler(app.handle().clone());
             Ok(())
         })
         .manage(OperationState::new())

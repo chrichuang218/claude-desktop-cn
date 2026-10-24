@@ -67,6 +67,8 @@ pub struct ClaudeStatus {
     pub latest_version: Option<String>,
     pub update_check_error: Option<String>,
     pub last_update_check: Option<String>,
+    /// A background check of the official version is running.
+    pub update_checking: bool,
 }
 
 fn run(command: &mut Command) -> Result<String, String> {
@@ -246,6 +248,7 @@ pub fn status() -> Result<ClaudeStatus, String> {
         latest_version: latest,
         update_check_error: cached.as_ref().and_then(|value| value.error.clone()),
         last_update_check: cached.map(|value| value.checked_at),
+        update_checking: crate::self_update::claude_update_checking(),
     })
 }
 
