@@ -15,9 +15,31 @@ use std::{
 
 const ASSET: &str = "claude-windows-cn.exe";
 const CHECKSUM: &str = "claude-windows-cn.exe.sha256";
+const UPDATE_DIR: &str = "self-update";
+const STAGED_PREFIX: &str = "claude-windows-cn-";
+const BACKUP: &str = "claude-windows-cn.exe.bak";
 static CACHE_LOCK: Mutex<()> = Mutex::new(());
 
 include!("self_update_shared.rs");
+
+/// Startup cleanup: staged downloads no newer than this build are spent, and the
+/// rollback copy is no longer needed once the update reported success.
+pub fn clean_cache(data: &Path) -> Vec<String> {
+    let updated = last_update_result()
+        .ok()
+        .flatten()
+        .is_some_and(|result| result.ok);
+    util::remove_entries(data, &data.join(UPDATE_DIR), |name| {
+        (updated && name == BACKUP)
+            || name
+                .strip_prefix(STAGED_PREFIX)
+                .and_then(|rest| rest.strip_suffix(".exe"))
+                .is_some_and(|version| {
+                    claude::compare_versions(version, env!("CARGO_PKG_VERSION"))
+                        != std::cmp::Ordering::Greater
+                })
+    })
+}
 
 fn release_api(url: &str, allow_missing: bool) -> Result<Option<Release>, String> {
     let script = format!(
@@ -77,9 +99,15 @@ pub fn install(operation: &OperationState) -> Result<OperationOutcome, String> {
             env!("CARGO_PKG_VERSION")
         )));
     }
-    let work = util::data_dir()?.join("self-update");
+    let data = util::data_dir()?;
+    let work = data.join(UPDATE_DIR);
     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-    let executable = work.join(format!("claude-windows-cn-{}.exe", release.version));
+    for error in
+        util::prune_versioned_downloads(&data, &work, STAGED_PREFIX, ".exe", Some(&release.version))
+    {
+        operation.log(error);
+    }
+    let executable = work.join(format!("{STAGED_PREFIX}{}.exe", release.version));
     let checksum = work.join(CHECKSUM);
     operation.step("下载助手程序及 SHA256 摘要");
     util::download(&release.asset_url, &executable)?;
@@ -94,7 +122,7 @@ pub fn install(operation: &OperationState) -> Result<OperationOutcome, String> {
     }
     operation.step("准备替换助手程序");
     let script = work.join("apply-update.ps1");
-    let backup = work.join("claude-windows-cn.exe.bak");
+    let backup = work.join(BACKUP);
     let result = work.join("apply-result.json");
     if result.exists() {
         fs::remove_file(&result).map_err(|error| error.to_string())?;
@@ -149,6 +177,8 @@ fn updater_script(
             Copy-Item -LiteralPath $staged -Destination $target -Force -ErrorAction Stop
             $process=Start-Process -FilePath $target -PassThru -ErrorAction Stop
             if (-not $process) {{ throw '新版助手未启动。' }}
+            # The staged copy is now installed; only the rollback copy is still useful.
+            Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
             # Version records are informational; never roll back a working exe over them.
             try {{
                 $manifest=Join-Path (Split-Path -Parent $target) 'install.json'
@@ -344,5 +374,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
         assert_eq!(record["version"], "9.9.9");
         assert_eq!(record["installPath"], "x");
+        assert!(!staged.exists(), "installed staged copy should be removed");
+        assert!(fixture.path("old.bak").is_file());
     }
 }

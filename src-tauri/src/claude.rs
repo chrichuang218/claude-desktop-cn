@@ -15,8 +15,26 @@ use std::{
 };
 
 const FAMILY: &str = "Claude_pzs8sxrjxfjjc";
-const APP_ID: &str = "Claude_pzs8sxrjxfjjc!Claude";
+pub(crate) const APP_ID: &str = "Claude_pzs8sxrjxfjjc!Claude";
 const MSIX_URL: &str = "https://api.anthropic.com/api/desktop/win32/x64/msix/latest/redirect";
+const MSIX_DIR: &str = "official-msix";
+const MSIX_PREFIX: &str = "Claude-";
+const MSIX_SUFFIX: &str = ".msix";
+const CLOSE_DESKTOP_DIR: &str = "close-desktop";
+
+/// Startup cleanup of downloads and work directories left by earlier versions.
+/// Without online metadata, the newest cached package is the only one worth keeping.
+pub fn clean_cache(data: &Path) -> Vec<String> {
+    let mut errors =
+        util::prune_versioned_downloads(data, &data.join(MSIX_DIR), MSIX_PREFIX, MSIX_SUFFIX, None);
+    errors.extend(util::keep_newest_entries(
+        data,
+        &data.join(CLOSE_DESKTOP_DIR),
+        |_| true,
+        util::KEPT_FAILED_RUNS,
+    ));
+    errors
+}
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -259,7 +277,9 @@ fn restore_desktop_service(
 }
 
 fn run_desktop_script(contents: &str, operation: &OperationState) -> Result<(), String> {
-    let work = util::data_dir()?.join("close-desktop").join(
+    let data = util::data_dir()?;
+    let runs = data.join(CLOSE_DESKTOP_DIR);
+    let work = runs.join(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| error.to_string())?
@@ -267,20 +287,28 @@ fn run_desktop_script(contents: &str, operation: &OperationState) -> Result<(), 
             .to_string(),
     );
     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
-    let script = work.join("close-desktop.ps1");
-    util::write_script(&script, contents)?;
-    // Reuse the updater's service -> terminate -> wait sequence through the existing
-    // elevated helper. Appx registration stays in the original user's process.
-    let elevated = util::powershell(
-        "([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)",
-    )?.eq_ignore_ascii_case("true");
-    let result = if elevated {
-        util::run_script(&script).map(|log| operation.log(log))
-    } else {
-        util::run_elevated_script_with_logs(&script, &work, |chunk| operation.log(chunk))
-            .map(|_| ())
-    };
-    result.map_err(|error| {
+    // Every exit after the work directory exists finishes it. Preparation errors
+    // (outer) are returned as they are; script failures (inner) are summarized.
+    let result: Result<Result<(), String>, String> = (|| {
+        let script = work.join("close-desktop.ps1");
+        util::write_script(&script, contents)?;
+        // Reuse the updater's service -> terminate -> wait sequence through the existing
+        // elevated helper. Appx registration stays in the original user's process.
+        let elevated = util::powershell(
+            "([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)",
+        )?.eq_ignore_ascii_case("true");
+        Ok(if elevated {
+            util::run_script(&script).map(|log| operation.log(log))
+        } else {
+            util::run_elevated_script_with_logs(&script, &work, |chunk| operation.log(chunk))
+                .map(|_| ())
+        })
+    })();
+    let succeeded = matches!(result, Ok(Ok(())));
+    for error in util::finish_work_dir(&data, &runs, &work, succeeded) {
+        operation.log(error);
+    }
+    result?.map_err(|error| {
         operation.log(format!("关闭 Claude Desktop 完整错误：{error}"));
         "关闭 Claude Desktop 失败，详细原因见执行日志。".into()
     })
@@ -459,9 +487,10 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
     } else if only_update {
         return Err("当前用户未安装 Claude Desktop，请先安装。".into());
     }
-    let download_dir = util::data_dir()?.join("official-msix");
+    let data = util::data_dir()?;
+    let download_dir = data.join(MSIX_DIR);
     fs::create_dir_all(&download_dir).map_err(|error| error.to_string())?;
-    let msix = download_dir.join(format!("Claude-{}.msix", metadata.version));
+    let msix = download_dir.join(format!("{MSIX_PREFIX}{}{MSIX_SUFFIX}", metadata.version));
     let reuse = if msix.is_file() {
         operation.step("校验已下载的官方 MSIX 缓存");
         match util::powershell(&cached_msix_check_script(&msix, &metadata.version)) {
@@ -482,6 +511,16 @@ pub fn install(operation: &OperationState, only_update: bool) -> Result<Operatio
         operation.step("下载官方 x64 MSIX");
         operation.set_cancelable(true);
         download_msix(&metadata.url, &msix, operation)?;
+    }
+    // Only the target version can still be installed; older packages just take space.
+    for error in util::prune_versioned_downloads(
+        &data,
+        &download_dir,
+        MSIX_PREFIX,
+        MSIX_SUFFIX,
+        Some(&metadata.version),
+    ) {
+        operation.log(error);
     }
     operation.step("校验官方 MSIX");
     operation.log(format!(
@@ -765,6 +804,31 @@ fn verify_official_executable(package: &ClaudePackage) -> Result<(), String> {
     Ok(())
 }
 
+/// Removes only the Claude shortcut this assistant made: it still opens the
+/// official app and its icon is the copy kept under the assistant's `icons`.
+pub(crate) fn remove_desktop_shortcut_script(desktop: &Path, icons: &Path) -> String {
+    format!(
+        r#"$ErrorActionPreference='Stop'
+$claudeLink=Join-Path {desktop} 'Claude Desktop.lnk'
+if (Test-Path -LiteralPath $claudeLink) {{
+    # A shortcut that cannot be read gives no proof of ownership and stays.
+    $claudeOwned=$false
+    try {{
+        $claudeShortcut=(New-Object -ComObject WScript.Shell).CreateShortcut($claudeLink)
+        # Icons were saved as data\icons/<name>; compare with one separator style.
+        $claudeIcon=($claudeShortcut.IconLocation -replace ',-?\d+$','') -replace '/','\'
+        $claudeIcons=({icons} -replace '/','\').TrimEnd('\') + '\'
+        $claudeOwned=$claudeShortcut.TargetPath -eq (Join-Path $env:WINDIR 'explorer.exe') -and $claudeShortcut.Arguments -eq {args} -and $claudeIcon.StartsWith($claudeIcons, [StringComparison]::OrdinalIgnoreCase)
+    }} catch {{ }}
+    if ($claudeOwned) {{ Remove-Item -LiteralPath $claudeLink -Force -ErrorAction Stop }}
+}}
+"#,
+        desktop = ps_path(desktop),
+        args = ps_quote(format!(r"shell:AppsFolder\{APP_ID}")),
+        icons = ps_path(icons),
+    )
+}
+
 fn desktop_shortcut_script(package: &ClaudePackage, desktop: &Path, icon: &Path) -> String {
     format!(
         r#"$desktop={desktop}
@@ -864,6 +928,138 @@ pub fn create_shortcut(operation: &OperationState) -> Result<OperationOutcome, S
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    #[cfg(windows)]
+    fn close_preparation_failures_still_finish_their_work_directories() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const CHILD: &str = "CLAUDE_WINDOWS_CN_CLOSE_PREPARATION_TEST_CHILD";
+        let names = |dir: &Path| {
+            let mut names = fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        if std::env::var_os(CHILD).is_some() {
+            let runs = util::data_dir().unwrap().join(CLOSE_DESKTOP_DIR);
+            let operation = OperationState::new();
+            let fail = || {
+                std::thread::sleep(Duration::from_millis(20));
+                // PATH is empty, so the elevation probe cannot start PowerShell
+                // after the script was written; nothing reaches Claude.
+                let error = run_desktop_script("throw 'must not run'", &operation).unwrap_err();
+                assert!(error.contains("PowerShell 启动失败"), "{error}");
+                names(&runs)
+            };
+            let first = fail();
+            fail();
+            let left = fail();
+            assert_eq!(left.len(), 2, "{left:?}");
+            assert!(!left.contains(&first[0]), "{left:?}");
+            for name in &left {
+                assert!(runs.join(name).join("close-desktop.ps1").is_file());
+            }
+            // An older run that cannot be removed is logged; the original error stays.
+            let _held = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(runs.join(&left[0]).join("close-desktop.ps1"))
+                .unwrap();
+            fail();
+            assert!(
+                operation
+                    .snapshot()
+                    .logs
+                    .iter()
+                    .any(|line| line.contains("清理") && line.contains(&left[0])),
+                "{:?}",
+                operation.snapshot().logs
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "claude-close-preparation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "claude::tests::close_preparation_failures_still_finish_their_work_directories",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("LOCALAPPDATA", &root)
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn uninstall_removes_only_the_claude_shortcut_this_assistant_made() {
+        let root = std::env::temp_dir().join(format!(
+            "claude-shortcut-removal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(
+            root.join("assets/Square44x44Logo.targetsize-256.png"),
+            include_bytes!("../icons/icon.png"),
+        )
+        .unwrap();
+        let package = ClaudePackage {
+            package_full_name: String::new(),
+            package_family_name: FAMILY.into(),
+            version: "1.0.0.0".into(),
+            architecture: "X64".into(),
+            install_location: root.to_string_lossy().into(),
+        };
+        // The same path forms as production: create_shortcut stores
+        // data\icons/<name>, and uninstall passes data\icons.
+        let data = root.join("data");
+        let icons = data.join("icons");
+        let link = root.join("Claude Desktop.lnk");
+        let create =
+            desktop_shortcut_script(&package, &root, &data.join("icons/claude-desktop-app.ico"));
+        util::powershell(&create).unwrap();
+        // An icon outside this assistant's data means another tool made it.
+        util::powershell(&remove_desktop_shortcut_script(&root, &root.join("other"))).unwrap();
+        assert!(link.is_file());
+        // A shortcut that no longer opens the official app is not ours either.
+        util::powershell(&format!(
+            "$s=(New-Object -ComObject WScript.Shell).CreateShortcut({}); $s.Arguments='foreign'; $s.Save()",
+            ps_path(&link)
+        ))
+        .unwrap();
+        util::powershell(&remove_desktop_shortcut_script(&root, &icons)).unwrap();
+        assert!(link.is_file());
+        fs::remove_file(&link).unwrap();
+        util::powershell(&create).unwrap();
+        util::powershell(&remove_desktop_shortcut_script(&root, &icons)).unwrap();
+        assert!(!link.exists());
+        // Running again with nothing to remove is harmless.
+        util::powershell(&remove_desktop_shortcut_script(&root, &icons)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     #[cfg(windows)]

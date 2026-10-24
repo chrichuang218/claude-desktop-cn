@@ -390,9 +390,11 @@ function App() {
     const finished = operation
     void refreshStatus().then((currentAssistant) => {
       setPage(finished.kind === 'uninstall_assistant' && !currentAssistant?.installed ? 'setup' : returnPage(finished.kind))
-      const deferred = (finished.kind === 'install_assistant_update' && finished.message.includes('替换进程已启动'))
-        || (finished.kind === 'uninstall_assistant' && finished.message.includes('卸载脚本已启动'))
-      const message = deferred ? `${finished.message}最终结果将在下次启动助手后显示。` : finished.message
+      const deferredUpdate = finished.kind === 'install_assistant_update' && finished.message.includes('替换进程已启动')
+      const deferredUninstall = finished.kind === 'uninstall_assistant' && finished.message.includes('卸载脚本已启动')
+      const deferred = deferredUpdate || deferredUninstall
+      // A clean uninstall leaves no result behind; only a failure is kept to show next time.
+      const message = deferredUpdate ? `${finished.message}最终结果将在下次启动助手后显示。` : deferredUninstall ? `${finished.message}成功后不会留下记录；如果失败，下次启动助手时会显示原因。` : finished.message
       setSettingsNotice(deferred ? message : '')
       setNotice(noticeKinds.includes(finished.kind) ? finished.message : '')
       setOperation(null)
@@ -595,6 +597,7 @@ function App() {
             </div> : null}
 
             {page === 'setup' ? <section className="ca-setup" aria-label="安装助手">
+              {assistant?.uninstallResultOk === false && assistant.uninstallResult ? <p className="ca-settings-message" data-error role="alert">{assistant.uninstallResult}</p> : null}
               <div className="ca-install-label"><label htmlFor="ca-install-mode">安装方式</label></div>
               <select id="ca-install-mode" className="ca-install-select" value={config.assistantInstallMode} onChange={(event) => changeInstallMode(event.target.value as InstallMode)} disabled={!assistant || busy}>
                 <option value="portable">便携方式</option><option value="user">用户安装（推荐）</option><option value="system">系统安装</option>
@@ -673,7 +676,7 @@ function App() {
                 {assistant?.updateResult ? <p className="ca-settings-message" data-error={assistant.updateResultOk === false} role={assistant.updateResultOk === false ? 'alert' : 'status'}>{assistant.updateResult}</p> : null}
                 {settingsNotice && !settingsNotice.includes('卸载脚本已启动') ? <p className="ca-settings-message" role="status">{settingsNotice}</p> : null}              </div>
               <div className="ca-danger-zone">
-                <div className="ca-settings-row"><div><h3>卸载助手</h3><p>仅移除助手及其创建的入口，Claude Desktop 与个人数据将保留。</p></div><button type="button" className="ca-button ca-danger-button" onClick={() => confirmAction('卸载助手？', '仅移除助手及其创建的入口。Claude Desktop 与个人数据将保留。', 'uninstall_assistant')}>卸载助手</button></div>
+                <div className="ca-settings-row"><div><h3>卸载助手</h3><p>移除助手、它创建的入口和全部助手数据。Claude Desktop 及其个人数据保留；需要英文界面请先恢复原样。</p></div><button type="button" className="ca-button ca-danger-button" onClick={() => confirmAction('卸载助手？', '将移除助手、它创建的入口（含 Claude Desktop 桌面快捷方式）和全部助手数据，完成后助手退出。Claude Desktop 及其个人数据保留；卸载不会恢复汉化，需要英文界面请先恢复原样。', 'uninstall_assistant')}>卸载助手</button></div>
                 {assistant?.uninstallResult ? <p className="ca-settings-message" data-error={assistant.uninstallResultOk === false} role={assistant.uninstallResultOk === false ? 'alert' : 'status'}>{assistant.uninstallResult}</p> : null}
                 {settingsNotice.includes('卸载脚本已启动') ? <p className="ca-settings-message" role="status">{settingsNotice}</p> : null}
               </div>

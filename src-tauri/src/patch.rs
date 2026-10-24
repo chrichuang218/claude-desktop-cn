@@ -1,4 +1,4 @@
-use crate::engine_cache::download_engine;
+use crate::engine_cache::{self, download_engine};
 use crate::{
     claude::{self, ClaudePackage},
     operation::{OperationOutcome, OperationState},
@@ -15,6 +15,7 @@ const ENGINE_URL: &str =
     "https://github.com/javaht/claude-desktop-zh-cn/archive/refs/heads/main.zip";
 const ENGINE_DOWNLOAD_URL: &str =
     "https://codeload.github.com/javaht/claude-desktop-zh-cn/zip/refs/heads/main";
+const ENGINE_DIR: &str = "patch-engine";
 
 // Reused from claude-desktop-zh: retain its bundle batching and effort-label adaptation.
 const FAST_HARDCODED_FRONTEND_PATCH_FUNCTION: &str = r#"
@@ -368,24 +369,71 @@ fn collect_backup_files(root: &Path) -> Result<Vec<BackupFile>, String> {
 }
 
 struct Engine {
+    work: PathBuf,
     root: PathBuf,
     script: PathBuf,
     sha256: String,
 }
 
+/// Startup cleanup of engine leftovers from earlier versions.
+pub fn clean_cache(data: &Path) -> Vec<String> {
+    let engine_dir = data.join(ENGINE_DIR);
+    let mut errors = engine_cache::prune_unreferenced(data, &engine_dir.join("cache"));
+    match pending_path() {
+        Ok(pending) => errors.extend(engine_cache::prune_failed_runs(data, &engine_dir, &pending)),
+        Err(error) => errors.push(error),
+    }
+    errors
+}
+
+/// Runs on every exit path after the engine was fetched, success or failure.
+fn finish_engine_run(engine: &Engine, succeeded: bool, operation: &OperationState) {
+    let errors = match (util::data_dir(), pending_path()) {
+        (Ok(data), Ok(pending)) => engine_cache::finish_run(
+            &data,
+            &data.join(ENGINE_DIR),
+            &pending,
+            &engine.work,
+            succeeded,
+        ),
+        (Err(error), _) | (_, Err(error)) => vec![error],
+    };
+    for error in errors {
+        operation.log(error);
+    }
+}
+
 fn fetch_engine(operation: &OperationState) -> Result<Engine, String> {
     operation.step("检查最新汉化引擎");
+    let data = util::data_dir()?;
+    let engine_dir = data.join(ENGINE_DIR);
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis();
-    let work = util::data_dir()?
-        .join("patch-engine")
-        .join(format!("run-{}-{time}", std::process::id()));
+    let work = engine_dir.join(format!("run-{}-{time}", std::process::id()));
     fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    let cache_dir = engine_dir.join("cache");
+    let result = fetch_engine_into(&work, &cache_dir, time, operation);
+    let errors = match &result {
+        Ok(engine) => engine_cache::prune(&data, &cache_dir, &engine.sha256),
+        // Nothing has run yet, so a failed download or check leaves no evidence worth keeping.
+        Err(_) => util::remove_work_dir(&work).err().into_iter().collect(),
+    };
+    for error in errors {
+        operation.log(error);
+    }
+    result
+}
+
+fn fetch_engine_into(
+    work: &Path,
+    cache_dir: &Path,
+    time: u128,
+    operation: &OperationState,
+) -> Result<Engine, String> {
     let zip = work.join("main.zip");
-    let cache_dir = util::data_dir()?.join("patch-engine").join("cache");
-    let cache = download_engine(ENGINE_DOWNLOAD_URL, &cache_dir, &zip, operation)?;
+    let cache = download_engine(ENGINE_DOWNLOAD_URL, cache_dir, &zip, operation)?;
     let sha256 = cache.sha256.clone();
     operation.log(format!(
         "引擎来源：{ENGINE_URL}；检查时间：{time}；SHA256：{sha256}"
@@ -418,7 +466,7 @@ fn fetch_engine(operation: &OperationState) -> Result<Engine, String> {
         return Err("最新引擎结构不兼容，已停止操作。".into());
     }
     // Publish only archives that passed extraction and the engine structure checks.
-    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(cache_dir).map_err(|error| error.to_string())?;
     let archive_stage = cache_dir.join("archive.partial");
     fs::copy(&zip, &archive_stage).map_err(|error| error.to_string())?;
     util::replace_file(&archive_stage, &cache_dir.join(format!("{sha256}.zip")))?;
@@ -430,6 +478,7 @@ fn fetch_engine(operation: &OperationState) -> Result<Engine, String> {
     .map_err(|error| error.to_string())?;
     util::replace_file(&metadata_stage, &cache_dir.join("metadata.json"))?;
     Ok(Engine {
+        work: work.to_path_buf(),
         root,
         script: source,
         sha256,
@@ -452,12 +501,24 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     if let Some(ref manifest) = existing {
         validate_backup(manifest, &package)?;
     }
-    let backup_root = package.resources().join(".zh-cn-backups");
     if existing.is_none() && has_localization_assets(&package.resources()) {
         return Err("检测到其他来源的中文资源或备份，助手不会接管。".into());
     }
     let engine = fetch_engine(operation)?;
-    let script = adapt_engine(&engine, &package)?;
+    let result = apply_with_engine(mode, &package, existing, &engine, operation);
+    finish_engine_run(&engine, result.is_ok(), operation);
+    result
+}
+
+fn apply_with_engine(
+    mode: &str,
+    package: &ClaudePackage,
+    existing: Option<BackupManifest>,
+    engine: &Engine,
+    operation: &OperationState,
+) -> Result<OperationOutcome, String> {
+    let backup_root = package.resources().join(".zh-cn-backups");
+    let script = adapt_engine(engine, package)?;
     let pending = if existing.is_none() {
         let pending = PendingPatch {
             package_full_name: package.package_full_name.clone(),
@@ -472,16 +533,16 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     let result = (|| {
         if let Some(mut manifest) = existing {
             operation.step("按当前版本备份恢复原始文件");
-            run_engine(&engine, &script, &package, "uninstall", None, operation)?;
-            verify_restored(&manifest, &package)?;
+            run_engine(engine, &script, package, "uninstall", None, operation)?;
+            verify_restored(&manifest, package)?;
             manifest.applied_mode = None;
             save_manifest(&manifest)?;
         }
         operation.step("应用简体中文资源");
         run_engine(
-            &engine,
+            engine,
             &script,
-            &package,
+            package,
             "install",
             pending.as_ref(),
             operation,
@@ -523,11 +584,11 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
             if read_pending()?.is_none() {
                 return Err(error);
             }
-            match rollback_first_apply(&pending, &package, &engine, &script, operation) {
+            match rollback_first_apply(&pending, package, engine, &script, operation) {
                 Ok(()) => Err(format!("{error}；操作失败但已验证回滚。")),
                 Err(rollback_error) => Err(format!(
                     "{error}；无法证明安全恢复：{rollback_error}。{}",
-                    recovery_message(&package)?
+                    recovery_message(package)?
                 )),
             }
         }
@@ -602,14 +663,18 @@ pub fn restore(operation: &OperationState) -> Result<OperationOutcome, String> {
     let mut manifest = read_manifest()?.ok_or("没有本助手创建的当前版本备份，无法恢复。")?;
     validate_backup(&manifest, &package)?;
     let engine = fetch_engine(operation)?;
-    let script = adapt_engine(&engine, &package)?;
-    operation.step("恢复当前 Claude 版本的原始文件");
-    run_engine(&engine, &script, &package, "uninstall", None, operation)?;
-    verify_restored(&manifest, &package)?;
-    manifest.applied_mode = None;
-    manifest.engine_sha256 = engine.sha256;
-    save_manifest(&manifest)?;
-    Ok(OperationOutcome::done("当前 Claude 版本的原始文件已恢复。"))
+    let result = (|| {
+        let script = adapt_engine(&engine, &package)?;
+        operation.step("恢复当前 Claude 版本的原始文件");
+        run_engine(&engine, &script, &package, "uninstall", None, operation)?;
+        verify_restored(&manifest, &package)?;
+        manifest.applied_mode = None;
+        manifest.engine_sha256 = engine.sha256.clone();
+        save_manifest(&manifest)?;
+        Ok(OperationOutcome::done("当前 Claude 版本的原始文件已恢复。"))
+    })();
+    finish_engine_run(&engine, result.is_ok(), operation);
+    result
 }
 
 fn verify_restored(manifest: &BackupManifest, package: &ClaudePackage) -> Result<(), String> {
@@ -1170,6 +1235,7 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
         let script = root.join("scripts/install_windows.ps1");
         fs::write(&script, &source).unwrap();
         let engine = Engine {
+            work: root.clone(),
             root: root.clone(),
             script,
             sha256: String::new(),

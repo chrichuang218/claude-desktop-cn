@@ -1,6 +1,6 @@
 use crate::{
     claude::{self, ClaudePackage},
-    engine_cache::download_engine,
+    engine_cache::{self, download_engine},
     operation::{OperationOutcome, OperationState},
     util,
 };
@@ -15,6 +15,7 @@ use std::{
 
 const ENGINE_URL: &str =
     "https://codeload.github.com/javaht/claude-desktop-zh-cn/zip/refs/heads/main";
+const ENGINE_DIR: &str = "patch-engine";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -341,14 +342,62 @@ struct Engine {
     sha256: String,
 }
 
+/// Startup cleanup of engine leftovers from earlier versions.
+pub fn clean_cache(data: &Path) -> Vec<String> {
+    let engine_dir = data.join(ENGINE_DIR);
+    let mut errors = engine_cache::prune_unreferenced(data, &engine_dir.join("cache"));
+    match record("patch-pending.json") {
+        Ok(pending) => errors.extend(engine_cache::prune_failed_runs(data, &engine_dir, &pending)),
+        Err(error) => errors.push(error),
+    }
+    errors
+}
+
+/// Runs on every exit path after the engine was fetched, success or failure.
+fn finish_engine_run(engine: &Engine, succeeded: bool, operation: &OperationState) {
+    let errors = match (util::data_dir(), record("patch-pending.json")) {
+        (Ok(data), Ok(pending)) => engine_cache::finish_run(
+            &data,
+            &data.join(ENGINE_DIR),
+            &pending,
+            &engine.work,
+            succeeded,
+        ),
+        (Err(error), _) | (_, Err(error)) => vec![error],
+    };
+    for error in errors {
+        operation.log(error);
+    }
+}
+
 fn fetch_engine(python: &Path, operation: &OperationState) -> Result<Engine, String> {
     operation.step("在线检查最新汉化引擎");
-    let work = unique_dir(&record("patch-engine")?)?;
+    let data = util::data_dir()?;
+    let engine_dir = data.join(ENGINE_DIR);
+    let work = unique_dir(&engine_dir)?;
+    let cache_dir = engine_dir.join("cache");
+    let result = fetch_engine_into(python, &work, &cache_dir, operation);
+    let errors = match &result {
+        Ok(engine) => engine_cache::prune(&data, &cache_dir, &engine.sha256),
+        // Nothing has run yet, so a failed download or check leaves no evidence worth keeping.
+        Err(_) => util::remove_work_dir(&work).err().into_iter().collect(),
+    };
+    for error in errors {
+        operation.log(error);
+    }
+    result
+}
+
+fn fetch_engine_into(
+    python: &Path,
+    work: &Path,
+    cache_dir: &Path,
+    operation: &OperationState,
+) -> Result<Engine, String> {
     let adapter = work.join("assistant_adapter.py");
     fs::write(&adapter, include_str!("engine_adapter.py")).map_err(|e| e.to_string())?;
     let zip = work.join("main.zip");
-    let cache_dir = record("patch-engine")?.join("cache");
-    let cache = download_engine(ENGINE_URL, &cache_dir, &zip, operation)?;
+    let cache = download_engine(ENGINE_URL, cache_dir, &zip, operation)?;
     let extracted = work.join("extracted");
     // Validate every ZIP member before extraction (upstream archives contain no symlinks).
     run(Command::new(python)
@@ -384,14 +433,14 @@ fn fetch_engine(python: &Path, operation: &OperationState) -> Result<Engine, Str
     if !root.join("resources/frontend-zh-CN.json").is_file() {
         return Err("最新引擎缺少简体中文资源。".into());
     }
-    fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
     let stage = cache_dir.join("archive.partial");
     fs::copy(&zip, &stage).map_err(|e| e.to_string())?;
     util::replace_file(&stage, &cache_dir.join(format!("{}.zip", cache.sha256)))?;
     write_json(&cache_dir.join("metadata.json"), &cache)?;
     operation.log(format!("引擎来源：{ENGINE_URL}；SHA256：{}", cache.sha256));
     Ok(Engine {
-        work,
+        work: work.to_path_buf(),
         script,
         sha256: cache.sha256,
     })
@@ -562,13 +611,26 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
     }
     let python = python()?;
     let package = claude::query_package()?.ok_or("未安装官方 Claude Desktop。")?;
-    let mut manifest = read_manifest()?.filter(|m| matches_package(m, &package));
+    let manifest = read_manifest()?.filter(|m| matches_package(m, &package));
     if let Some(ref current) = manifest {
         validate_backup(current, &package)?;
     } else if localized(&package.root()) || foreign_backup(&package.root())? {
         return Err("检测到其他来源的中文资源或备份，助手不会接管。".into());
     }
     let engine = fetch_engine(&python, operation)?;
+    let result = apply_with_engine(mode, &python, &package, manifest, &engine, operation);
+    finish_engine_run(&engine, result.is_ok(), operation);
+    result
+}
+
+fn apply_with_engine(
+    mode: &str,
+    python: &Path,
+    package: &ClaudePackage,
+    mut manifest: Option<BackupManifest>,
+    engine: &Engine,
+    operation: &OperationState,
+) -> Result<OperationOutcome, String> {
     if manifest.is_none() {
         operation.step("校验并备份当前版本的完整原始应用");
         claude::verify_official(&package.root())?;
@@ -603,15 +665,12 @@ pub fn apply(mode: &str, operation: &OperationState) -> Result<OperationOutcome,
         save_manifest(manifest.as_ref().ok_or("没有可用原始备份。")?)?;
     }
     let mut manifest = manifest.ok_or("没有可用原始备份。")?;
-    let source = validate_backup(&manifest, &package)?;
+    let source = validate_backup(&manifest, package)?;
     operation.step("在独立副本应用简体中文资源");
-    let staged = run_engine(&python, &engine, &source, mode, operation)?;
+    let staged = run_engine(python, engine, &source, mode, operation)?;
     manifest.applied_mode = Some(mode.into());
-    manifest.engine_sha256 = engine.sha256;
-    commit_bundle(&staged, &package, &manifest, false, operation)?;
-    if let Err(error) = fs::remove_dir_all(&engine.work) {
-        operation.log(format!("汉化成功，临时工作目录未清理：{error}"));
-    }
+    manifest.engine_sha256 = engine.sha256.clone();
+    commit_bundle(&staged, package, &manifest, false, operation)?;
     Ok(OperationOutcome::done("简体中文已应用。"))
 }
 
@@ -627,12 +686,11 @@ pub fn restore(operation: &OperationState) -> Result<OperationOutcome, String> {
     // actual restore uses our exact verified bundle, never upstream backup discovery.
     let engine = fetch_engine(&python()?, operation)?;
     manifest.applied_mode = None;
-    manifest.engine_sha256 = engine.sha256;
-    commit_bundle(&backup, &package, &manifest, true, operation)?;
-    if let Err(error) = fs::remove_dir_all(&engine.work) {
-        operation.log(format!("恢复成功，临时工作目录未清理：{error}"));
-    }
-    Ok(OperationOutcome::done("当前 Claude 版本的原始应用已恢复。"))
+    manifest.engine_sha256 = engine.sha256.clone();
+    let result = commit_bundle(&backup, &package, &manifest, true, operation)
+        .map(|()| OperationOutcome::done("当前 Claude 版本的原始应用已恢复。"));
+    finish_engine_run(&engine, result.is_ok(), operation);
+    result
 }
 
 #[cfg(test)]
