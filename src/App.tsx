@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
-import { ArrowRight, Check, ClipboardCopy, Copy, Download, FolderOpen, Info, Languages, LayoutDashboard, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
+import { ArrowRight, Check, ClipboardCopy, Copy, Download, ExternalLink, FolderOpen, Info, Languages, LayoutDashboard, MessageSquareText, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import './App.css'
@@ -111,7 +111,6 @@ const confirmationLabels: Partial<Record<OperationKind, string>> = {
 // Successful results worth reporting after returning from the operation page.
 const noticeKinds: OperationKind[] = ['install_claude', 'update_claude', 'apply_patch', 'restore_patch', 'create_claude_shortcut']
 const modeNames: Record<StoredPatchMode, string> = { safe: '本地界面汉化', full: '旧版汉化' }
-
 const defaultConfig: AssistantConfig = {
   assistantInstallMode: 'user',
   assistantPath: '',
@@ -540,6 +539,14 @@ function App() {
     }
   }
 
+  const openReplyGuardPage = async () => {
+    try {
+      await invoke<void>('open_reply_guard_page')
+    } catch (error) {
+      setActionError(`无法打开插件页面：${errorText(error)}`)
+    }
+  }
+
   const copyText = async (key: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -702,15 +709,22 @@ function App() {
                   {patchApplied ? <span className="ca-applied" role="status"><Check aria-hidden="true" />已应用</span> : null}
                 </div>
                 <p className="ca-localization-description">将侧边栏、设置、模型选择等本地界面文本翻译为简体中文。</p>
+                <p className="ca-localization-hint">官方账号已内置中文界面，在 Claude 的语言设置中切换即可，无需此补丁。</p>
                 <div className="ca-actions ca-localization-actions">
                   {patchApplied ? <button type="button" className="ca-button ca-primary" onClick={() => void openClaude()} disabled={patchDisabled}><Play aria-hidden="true" />打开 Claude</button> : <button type="button" className="ca-button ca-primary" onClick={applyPatch} disabled={patchDisabled}><Languages aria-hidden="true" />应用汉化</button>}
                   {patchApplied ? <button type="button" className="ca-text-button" onClick={applyPatch} disabled={patchDisabled}>重新应用</button> : null}
                   <button type="button" className="ca-text-button ca-localization-restore" onClick={() => confirmAction('恢复原样？', '恢复当前 Claude 版本可验证的原始应用文件，保留登录和聊天数据。', 'restore_patch')} disabled={busy || !claude?.backupReady || claude.patchRecoveryRequired}>恢复原样</button>
                 </div>
               </div>
-              <div className="ca-native-language-note">
-                <h3>官方账号已内置中文</h3>
-                <p>使用官方账号登录时，可直接在 Claude 的语言设置中切换中文，无需应用此补丁。</p>
+              <div className="ca-localization-card ca-reply-guard-card">
+                <div className="ca-localization-header">
+                  <span className="ca-localization-icon"><MessageSquareText aria-hidden="true" /></span>
+                  <div><h2>Claude Code 中文回复</h2><p>适用于官方账号的 Opus 5.5</p></div>
+                </div>
+                <p className="ca-localization-description">zh-reply-guard 插件让 Claude Code 的回复、问题卡和任务列表默认使用简体中文。</p>
+                <div className="ca-actions ca-localization-actions">
+                  <button type="button" className="ca-button ca-primary" onClick={() => void openReplyGuardPage()}>查看项目<ExternalLink aria-hidden="true" /></button>
+                </div>
               </div>
             </section> : null}
 

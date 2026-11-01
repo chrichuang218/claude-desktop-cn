@@ -153,6 +153,22 @@ fn open_data_dir() -> Result<(), String> {
         .map_err(|error| format!("无法打开 {}：{error}", path.display()))
 }
 
+// Opens only the built-in plugin page, so the frontend cannot hand it other URLs.
+#[tauri::command]
+fn open_reply_guard_page() -> Result<(), String> {
+    const URL: &str = "https://github.com/chrichuang218/claude-zh-reply-guard";
+    let program = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "explorer.exe"
+    };
+    std::process::Command::new(program)
+        .arg(URL)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开 {URL}：{error}"))
+}
+
 #[tauri::command]
 fn open_claude() -> Result<(), String> {
     claude::launch()
@@ -253,6 +269,7 @@ pub fn run() {
             start_operation,
             cancel_operation,
             open_data_dir,
+            open_reply_guard_page,
             open_claude,
             choose_assistant_install_path,
         ])

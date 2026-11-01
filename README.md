@@ -28,7 +28,7 @@
 
 ### 汉化 · 本地中文界面与恢复
 
-汉化页集中展示适用范围、补丁状态和操作按钮。只有本地界面汉化一个入口，可应用、重新应用或恢复原样；官方账号的中文设置另有说明。
+汉化页按账号类型分成两张卡片：本地界面汉化面向第三方 API 模式，可应用、重新应用或恢复原样，并注明官方账号无需此补丁；Claude Code 中文回复面向使用 Opus 5.5 的官方账号。
 
 <img src="docs/images/localization.png" alt="Claude 中文助手汉化页：本地界面汉化、应用汉化与恢复原样，以及官方账号中文设置说明" width="736" />
 
@@ -53,6 +53,10 @@
 
 旧版汉化记录和备份仍可用于恢复原样。重新应用或更新后自动汉化统一使用本地界面汉化。
 
+### 官方账号：让 Opus 5.5 用中文回复
+
+官方账号用户使用 Opus 5.5 时，Claude Code 里的回复、问题卡和任务列表常常变成英文，界面汉化管不到这些内容。汉化页的“Claude Code 中文回复”卡片介绍了 [zh-reply-guard](https://github.com/chrichuang218/claude-zh-reply-guard) 插件，安装方式见插件 README。助手不安装、不更新也不卸载这个插件，卸载助手时插件会保留。
+
 ## 快速上手
 
 1. 前往 [最新 Release](https://github.com/chrichuang218/claude-desktop-cn/releases/latest)，按下表下载适合系统和芯片架构的包。macOS 附件为预览版；各包均配套同名 `.sha256` 摘要。
@@ -72,7 +76,7 @@ macOS 解压后运行 `Claude 中文助手.app`。预览包使用 ad-hoc 本地�
 
 macOS 的汉化和恢复还需要 **Python 3.9 或更新版本**，可通过 [python.org](https://www.python.org/downloads/macos/) 或 Homebrew 安装。助手会检查依赖，缺少时明确提示，不会自动安装 Python；Claude 的安装、更新与启动不需要 Python。
 
-当前版本的验证范围与已知限制见 [更新日志](CHANGELOG.md#028---2026-10-24)。
+当前版本的验证范围与已知限制见 [更新日志](CHANGELOG.md#029---2026-11-01)。
 
 ## 常见问题
 
