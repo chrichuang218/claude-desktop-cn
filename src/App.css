@@ -93,10 +93,10 @@
     #claude-assistant-sketch .ca-localization-actions { padding-top:18px; border-top:1px solid var(--ca-line); gap:18px; }
     #claude-assistant-sketch .ca-localization-actions > .ca-primary { min-height:40px; padding:8px 16px; }
     #claude-assistant-sketch .ca-localization-restore { margin-left:auto; color:var(--ca-muted); }
-    #claude-assistant-sketch .ca-native-language-note { margin:22px 4px 0; }
-    #claude-assistant-sketch .ca-native-language-note h3 { font-size:13px; }
-    #claude-assistant-sketch .ca-native-language-note p { margin-top:5px; font-size:12px; line-height:1.7; color:var(--ca-muted); }
-    #claude-assistant-sketch .ca-track { height:4px; border-radius:3px; background:var(--ca-line); margin-top:10px; overflow:hidden; }
+    #claude-assistant-sketch .ca-localization-hint { margin-top:4px; font-size:12px; line-height:1.7; color:var(--ca-muted); }
+    /* Same card as the localization one: each serves a different account type. */
+    #claude-assistant-sketch .ca-reply-guard-card { margin-top:16px; }
+    #claude-assistant-sketch .ca-reply-guard-card .ca-primary svg { width:15px; height:15px; }    #claude-assistant-sketch .ca-track { height:4px; border-radius:3px; background:var(--ca-line); margin-top:10px; overflow:hidden; }
     #claude-assistant-sketch .ca-track span { display:block; height:100%; background:var(--ca-accent); }
     #claude-assistant-sketch .ca-overlay { position:absolute; inset:34px 0 0; background:var(--ca-scrim); display:flex; justify-content:flex-end; z-index:5; }
     #claude-assistant-sketch .ca-danger { color:var(--ca-danger); }
@@ -160,8 +160,7 @@
       #claude-assistant-sketch .ca-sidebar { padding:0 16px; }
       #claude-assistant-sketch .ca-main { padding:20px; }
       #claude-assistant-sketch .ca-localization-card { padding:20px; }
-      #claude-assistant-sketch .ca-localization-actions > .ca-primary { width:100%; }
-      #claude-assistant-sketch .ca-hero { flex-wrap:wrap; gap:14px; }
+      #claude-assistant-sketch .ca-localization-actions > .ca-primary { width:100%; }      #claude-assistant-sketch .ca-hero { flex-wrap:wrap; gap:14px; }
       #claude-assistant-sketch .ca-launch { width:100%; }
       #claude-assistant-sketch .ca-hero-copy h2 { font-size:24px; }
       #claude-assistant-sketch .ca-app-icon { width:50px; height:50px; }
