@@ -5,8 +5,10 @@ use crate::{
     util::{self, ps_path, ps_quote},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     env, fs,
+    io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -174,6 +176,7 @@ pub struct PatchState {
     pub recovery_required: bool,
     /// Mode recorded for an older Claude version that an official update replaced.
     pub previous_mode: Option<String>,
+    pub validation_error: Option<String>,
 }
 
 fn manifest_path() -> Result<PathBuf, String> {
@@ -228,7 +231,18 @@ fn save_manifest(manifest: &BackupManifest) -> Result<(), String> {
 }
 
 pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
-    let pending = read_pending()?;
+    Ok(state_with_records(
+        package,
+        read_manifest()?,
+        read_pending()?,
+    ))
+}
+
+fn state_with_records(
+    package: &ClaudePackage,
+    manifest: Option<BackupManifest>,
+    pending: Option<PendingPatch>,
+) -> PatchState {
     let recovery_required = pending.is_some();
     let pending_for_current = pending.as_ref().is_some_and(|item| {
         item.package_full_name == package.package_full_name
@@ -236,35 +250,36 @@ pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
             && item.install_location == package.install_location
     });
     let external_assets = has_localization_assets(&package.resources());
-    let Some(manifest) = read_manifest()? else {
-        return Ok(PatchState {
+    let Some(manifest) = manifest else {
+        return PatchState {
             applied_mode: None,
             backup_ready: false,
             external_localization: external_assets && !pending_for_current,
             recovery_required,
             previous_mode: None,
-        });
+            validation_error: None,
+        };
     };
     if manifest.package_full_name != package.package_full_name
         || manifest.version != package.version
         || manifest.install_location != package.install_location
     {
-        return Ok(PatchState {
+        return PatchState {
             applied_mode: None,
             backup_ready: false,
             external_localization: external_assets && !pending_for_current,
             recovery_required,
             previous_mode: manifest.applied_mode,
-        });
+            validation_error: None,
+        };
     }
     let valid = validate_backup(&manifest, package).is_ok();
-    let localized = package
-        .resources()
-        .join("ion-dist")
-        .join("i18n")
-        .join("zh-CN.json")
-        .is_file();
-    Ok(PatchState {
+    // Damaged resources must not hide an otherwise usable restore operation.
+    let (localized, validation_error) = match has_simplified_chinese(&package.resources()) {
+        Ok(localized) => (localized, None),
+        Err(error) => (false, Some(error)),
+    };
+    PatchState {
         applied_mode: if localized && !recovery_required {
             manifest.applied_mode
         } else {
@@ -274,7 +289,99 @@ pub fn state(package: &ClaudePackage) -> Result<PatchState, String> {
         external_localization: external_assets && !valid && !pending_for_current,
         recovery_required,
         previous_mode: None,
-    })
+        validation_error,
+    }
+}
+
+fn has_simplified_chinese(resources: &Path) -> Result<bool, String> {
+    let archive = resources.join("ion-dist.asar");
+    // Match the engine's layout priority; a leftover workspace must not mask a bad ASAR.
+    let catalog = if archive.try_exists().map_err(|error| error.to_string())? {
+        read_asar_chinese_catalog(&archive)
+            .map_err(|error| format!("校验 ion-dist.asar 内简体中文资源失败：{error}"))?
+    } else {
+        match fs::read(resources.join("ion-dist/i18n/zh-CN.json")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("读取简体中文资源失败：{error}")),
+        }
+    };
+    let Some(catalog) = catalog else {
+        return Ok(false);
+    };
+    let catalog = catalog.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&catalog);
+    let translations: std::collections::HashMap<String, String> =
+        serde_json::from_slice(catalog)
+            .map_err(|error| format!("简体中文词库不是有效的 JSON 词表：{error}"))?;
+    if translations.is_empty() {
+        return Err("简体中文词库为空。".into());
+    }
+    Ok(true)
+}
+
+fn read_asar_chinese_catalog(archive: &Path) -> Result<Option<Vec<u8>>, String> {
+    let mut file = fs::File::open(archive).map_err(|error| error.to_string())?;
+    let file_size = file.metadata().map_err(|error| error.to_string())?.len();
+    let mut prefix = [0u8; 16];
+    file.read_exact(&mut prefix)
+        .map_err(|error| error.to_string())?;
+    let word = |offset| u32::from_le_bytes(prefix[offset..offset + 4].try_into().unwrap()) as u64;
+    let (header_size, payload_size, json_size) = (word(4), word(8), word(12));
+    // Bound allocations and validate both Chromium Pickles before trusting offsets.
+    if word(0) != 4
+        || !(8..=64 * 1024 * 1024).contains(&header_size)
+        || payload_size + 4 != header_size
+        || (json_size + 7) & !3 != payload_size
+        || 8 + header_size > file_size
+    {
+        return Err("ASAR 头部长度或格式无效。".into());
+    }
+    let mut header = vec![0; json_size as usize];
+    file.read_exact(&mut header)
+        .map_err(|error| error.to_string())?;
+    let header: serde_json::Value =
+        serde_json::from_slice(&header).map_err(|error| error.to_string())?;
+    if !header["files"].is_object() {
+        return Err("ASAR 缺少文件索引。".into());
+    }
+    let Some(entry) = header.pointer("/files/i18n/files/zh-CN.json") else {
+        return Ok(None);
+    };
+    if entry.get("link").is_some()
+        || entry.get("files").is_some()
+        || entry["unpacked"].as_bool() == Some(true)
+    {
+        return Err("简体中文词库不是 ASAR 内的普通文件。".into());
+    }
+    let size = entry["size"].as_u64().ok_or("词库大小无效。")?;
+    let offset = entry["offset"]
+        .as_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or("词库偏移无效。")?;
+    let start = (8 + header_size)
+        .checked_add(offset)
+        .ok_or("词库偏移越界。")?;
+    if !(1..=32 * 1024 * 1024).contains(&size)
+        || start.checked_add(size).is_none_or(|end| end > file_size)
+    {
+        return Err("词库大小或偏移越界。".into());
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| error.to_string())?;
+    let mut catalog = vec![0; size as usize];
+    file.read_exact(&mut catalog)
+        .map_err(|error| error.to_string())?;
+    if let Some(integrity) = entry.get("integrity") {
+        let hash = format!("{:x}", Sha256::digest(&catalog));
+        if integrity["algorithm"].as_str() != Some("SHA256")
+            || !integrity["hash"]
+                .as_str()
+                .is_some_and(|expected| expected.eq_ignore_ascii_case(&hash))
+        {
+            return Err("简体中文词库 SHA256 校验失败。".into());
+        }
+    }
+    Ok(Some(catalog))
 }
 
 fn has_localization_assets(resources: &Path) -> bool {
@@ -552,13 +659,7 @@ fn apply_with_engine(
         if files.is_empty() {
             return Err("补丁操作完成，但没有可验证的原始文件备份。".into());
         }
-        if !package
-            .resources()
-            .join("ion-dist")
-            .join("i18n")
-            .join("zh-CN.json")
-            .is_file()
-        {
+        if !has_simplified_chinese(&package.resources())? {
             return Err("脚本退出成功，但未找到简体中文资源。".into());
         }
         let manifest = BackupManifest {
@@ -1007,6 +1108,154 @@ fn engine_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_locale_asar(path: &Path, language: &str, catalog: &[u8]) {
+        let header = serde_json::json!({"files": {"i18n": {"files": {
+            language: {"size": catalog.len(), "offset": "3", "integrity": {
+                "algorithm": "SHA256", "hash": format!("{:x}", Sha256::digest(catalog))
+            }}
+        }}}});
+        write_test_asar(path, &header, catalog);
+    }
+
+    fn write_test_asar(path: &Path, header: &serde_json::Value, catalog: &[u8]) {
+        let header = serde_json::to_vec(header).unwrap();
+        let payload_size = (4 + header.len() + 3) & !3;
+        let header_size = 4 + payload_size;
+        let mut archive = Vec::new();
+        for value in [
+            4,
+            header_size as u32,
+            payload_size as u32,
+            header.len() as u32,
+        ] {
+            archive.extend_from_slice(&value.to_le_bytes());
+        }
+        archive.extend_from_slice(&header);
+        archive.resize(8 + header_size, 0);
+        archive.extend_from_slice(b"pad");
+        archive.extend_from_slice(catalog);
+        fs::write(path, archive).unwrap();
+    }
+
+    #[test]
+    fn simplified_chinese_detects_packed_frontend_after_workspace_cleanup() {
+        let root = env::temp_dir().join(format!("claude-packed-locale-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("ion-dist.asar");
+        write_locale_asar(&archive, "zh-CN.json", r#"{"hello":"你好"}"#.as_bytes());
+        // The engine deletes its temporary ion-dist directory after repacking.
+        assert!(!root.join("ion-dist").exists());
+        let detected = has_simplified_chinese(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert!(detected, "脚本退出成功，但未找到简体中文资源。");
+    }
+
+    #[test]
+    fn simplified_chinese_validates_both_layouts_and_rejects_corruption() {
+        let root = env::temp_dir().join(format!("claude-locale-validation-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        assert!(!has_simplified_chinese(&root).unwrap());
+        let directory = root.join("ion-dist/i18n");
+        fs::create_dir_all(&directory).unwrap();
+        let catalog = r#"{"hello":"你好"}"#.as_bytes();
+        let loose = directory.join("zh-CN.json");
+        fs::write(&loose, catalog).unwrap();
+        assert!(has_simplified_chinese(&root).unwrap());
+        fs::write(&loose, [b"\xef\xbb\xbf".as_slice(), catalog].concat()).unwrap();
+        assert!(has_simplified_chinese(&root).unwrap());
+        fs::write(&loose, b"not JSON").unwrap();
+        assert!(has_simplified_chinese(&root).is_err());
+        fs::write(&loose, catalog).unwrap();
+
+        let archive = root.join("ion-dist.asar");
+        write_locale_asar(&archive, "en-US.json", catalog);
+        assert!(
+            !has_simplified_chinese(&root).unwrap(),
+            "ASAR takes precedence over leftover workspace"
+        );
+        write_locale_asar(&archive, "zh-CN.json", catalog);
+        assert!(has_simplified_chinese(&root).unwrap());
+        let good = fs::read(&archive).unwrap();
+        let mut damaged = good.clone();
+        *damaged.last_mut().unwrap() ^= 1;
+        fs::write(&archive, damaged).unwrap();
+        assert!(has_simplified_chinese(&root)
+            .unwrap_err()
+            .contains("SHA256"));
+        fs::write(&archive, &good[..good.len() - 1]).unwrap();
+        assert!(has_simplified_chinese(&root).unwrap_err().contains("越界"));
+        for bytes in [b"not an ASAR".as_slice(), b"{}", b"[]", b"{\"hello\":12}"] {
+            write_locale_asar(&archive, "zh-CN.json", bytes);
+            assert!(has_simplified_chinese(&root).is_err());
+        }
+        for entry in [
+            serde_json::json!({"size": 10, "offset": u64::MAX.to_string()}),
+            serde_json::json!({"size": u64::MAX, "offset": "0"}),
+            serde_json::json!({"size": 1, "offset": "0", "unpacked": true}),
+            serde_json::json!({"link": "en-US.json"}),
+            serde_json::json!({"files": {}}),
+        ] {
+            write_test_asar(
+                &archive,
+                &serde_json::json!({"files": {"i18n": {"files": {"zh-CN.json": entry}}}}),
+                catalog,
+            );
+            assert!(has_simplified_chinese(&root).is_err());
+        }
+        for prefix in [vec![0u8; 16], vec![255u8; 16], vec![4u8; 3]] {
+            fs::write(&archive, prefix).unwrap();
+            assert!(has_simplified_chinese(&root).is_err());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Read-only validation of a caller-supplied localized resources directory"]
+    fn simplified_chinese_validates_supplied_resources() {
+        let root = PathBuf::from(
+            env::var_os("CLAUDE_ASSISTANT_RESOURCES_FIXTURE").expect("resources fixture required"),
+        );
+        assert!(has_simplified_chinese(&root).unwrap());
+    }
+
+    #[test]
+    fn damaged_catalog_keeps_backup_and_restore_available() {
+        let root = env::temp_dir().join(format!("claude-locale-recovery-{}", std::process::id()));
+        let package = ClaudePackage {
+            version: "4.4212.0.0".into(),
+            architecture: "X64".into(),
+            package_full_name: "Claude_fixture".into(),
+            package_family_name: "Claude_pzs8sxrjxfjjc".into(),
+            install_location: root.display().to_string(),
+        };
+        let resources = package.resources();
+        let backup = resources.join(".zh-cn-backups/fixture");
+        fs::create_dir_all(&backup).unwrap();
+        fs::write(backup.join("ion-dist.asar"), b"original archive").unwrap();
+        let manifest = BackupManifest {
+            package_full_name: package.package_full_name.clone(),
+            version: package.version.clone(),
+            install_location: package.install_location.clone(),
+            backup_set: backup.display().to_string(),
+            files: collect_backup_files(&backup).unwrap(),
+            applied_mode: Some("safe".into()),
+            engine_sha256: "fixture".into(),
+        };
+        let archive = resources.join("ion-dist.asar");
+        write_locale_asar(&archive, "zh-CN.json", br#"{"hello":"translated"}"#);
+        let healthy = state_with_records(&package, Some(manifest.clone()), None);
+        assert_eq!(healthy.applied_mode.as_deref(), Some("safe"));
+        assert!(healthy.validation_error.is_none());
+
+        fs::write(&archive, b"truncated ASAR").unwrap();
+        let damaged = state_with_records(&package, Some(manifest), None);
+        assert!(damaged.backup_ready);
+        assert!(!damaged.recovery_required && !damaged.external_localization);
+        assert!(damaged.applied_mode.is_none());
+        assert!(damaged.validation_error.is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn engine_arguments_bind_for_current_and_legacy_parameters() {

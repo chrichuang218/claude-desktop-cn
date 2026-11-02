@@ -513,19 +513,21 @@ pub fn install(
 $dest={dest}
 $source={source}
 $target={target}
+# WScript.Shell expands 8.3 paths when reading a shortcut's target.
+$shortcutTarget=if (Test-Path -LiteralPath $target) {{ (Get-Item -LiteralPath $target).FullName }} else {{ $target }}
 $manifest={manifest}
 $desktop={desktop}
 $shell=New-Object -ComObject WScript.Shell
 $link=Join-Path $desktop 'Claude Windows 中文助手.lnk'
 if ({shortcut} -and (Test-Path -LiteralPath $link)) {{
-    if ($shell.CreateShortcut($link).TargetPath -ne $target) {{ throw '同名桌面快捷方式不属于本助手目标。' }}
+    if ($shell.CreateShortcut($link).TargetPath -ne $shortcutTarget) {{ throw '同名桌面快捷方式不属于本助手目标。' }}
 }}
 if ({registered}) {{
     $programs=if ({system}) {{ [Environment]::GetFolderPath('CommonPrograms') }} else {{ [Environment]::GetFolderPath('Programs') }}
     if (-not $programs) {{ throw '无法确定开始菜单目录。' }}
     $menu=Join-Path $programs 'Claude Windows 中文助手.lnk'
     if (Test-Path -LiteralPath $menu) {{
-        if ($shell.CreateShortcut($menu).TargetPath -ne $target) {{ throw '同名开始菜单快捷方式不属于本助手目标。' }}
+        if ($shell.CreateShortcut($menu).TargetPath -ne $shortcutTarget) {{ throw '同名开始菜单快捷方式不属于本助手目标。' }}
     }}
     $key={registry}
     if (Test-Path -LiteralPath $key) {{
@@ -653,10 +655,12 @@ pub fn uninstall(operation: &OperationState) -> Result<OperationOutcome, String>
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 $dest={dest}
 $exe=Join-Path $dest {exe}
+# Keep deletion/registry paths unchanged; normalize only shortcut ownership checks.
+$shortcutTarget=(Get-Item -LiteralPath $exe).FullName
 $manifest=Join-Path $dest 'install.json'
 $link={link}
 $shell=New-Object -ComObject WScript.Shell
-$removeLink=(Test-Path -LiteralPath $link) -and ($shell.CreateShortcut($link).TargetPath -eq $exe)
+$removeLink=(Test-Path -LiteralPath $link) -and ($shell.CreateShortcut($link).TargetPath -eq $shortcutTarget)
 $removeMenu=$false
 $removeKey=$false
 if ({registered}) {{
@@ -664,7 +668,7 @@ if ({registered}) {{
     if (-not $programs) {{ throw '无法确定开始菜单目录。' }}
     $menu=Join-Path $programs 'Claude Windows 中文助手.lnk'
     if (Test-Path -LiteralPath $menu) {{
-        if ($shell.CreateShortcut($menu).TargetPath -ne $exe) {{ throw '同名开始菜单快捷方式不属于本助手目标。' }}
+        if ($shell.CreateShortcut($menu).TargetPath -ne $shortcutTarget) {{ throw '同名开始菜单快捷方式不属于本助手目标。' }}
         $removeMenu=$true
     }}
     $key={registry}
@@ -940,6 +944,8 @@ mod tests {
             };
             save_config(config.clone()).unwrap();
             let operation = OperationState::new();
+            install(config.clone(), &operation).unwrap();
+            // Reinstall must recognize a shortcut whose target expands an 8.3 TEMP path.
             install(config, &operation).unwrap();
             let target = destination.join(util::EXE_NAME);
             let assistant_link = desktop.join("Claude Windows 中文助手.lnk");

@@ -71,6 +71,7 @@ pub struct ClaudeStatus {
     pub backup_ready: bool,
     pub external_localization: bool,
     pub patch_recovery_required: bool,
+    pub patch_validation_error: Option<String>,
     pub previous_mode: Option<String>,
     pub message: String,
     pub update_available: Option<bool>,
@@ -129,6 +130,7 @@ pub fn status() -> Result<ClaudeStatus, String> {
             backup_ready: false,
             external_localization: false,
             patch_recovery_required: false,
+            patch_validation_error: None,
             previous_mode: None,
             message: "未安装官方 Claude Desktop。".into(),
             update_available: None,
@@ -151,6 +153,7 @@ pub fn status() -> Result<ClaudeStatus, String> {
         backup_ready: state.backup_ready,
         external_localization: state.external_localization,
         patch_recovery_required: state.recovery_required,
+        patch_validation_error: state.validation_error,
         previous_mode: state.previous_mode,
         message: if state.recovery_required {
             patch::recovery_message(&package)?

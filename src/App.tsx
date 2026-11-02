@@ -25,6 +25,7 @@ type ClaudeStatus = {
   backupReady: boolean
   externalLocalization: boolean
   patchRecoveryRequired: boolean
+  patchValidationError?: string | null
   previousMode?: StoredPatchMode | null
   message: string
   updateAvailable?: boolean | null
@@ -701,6 +702,7 @@ function App() {
                 </div>
               </div> : null}
               {claude?.externalLocalization && !claude.patchRecoveryRequired ? <div className="ca-label">检测到其他来源的中文资源或备份，助手不会接管。</div> : null}
+              {claude?.patchValidationError && !claude.patchRecoveryRequired ? <div className="ca-label" role="alert">中文资源校验失败：{claude.patchValidationError}{claude.backupReady ? ' 可先恢复原样，再重新应用汉化。' : ' 当前没有可验证的备份，请保留日志并核查安装文件。'}</div> : null}
               {staleBanner}
               <div className="ca-localization-card">
                 <div className="ca-localization-header">
