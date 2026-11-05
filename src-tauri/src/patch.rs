@@ -856,6 +856,33 @@ fn replace_function(source: &str, name: &str, replacement: &str) -> Result<Strin
     Err(format!("最新引擎 {name} 括号不匹配。"))
 }
 
+fn adapt_write_access(source: &str) -> Result<String, String> {
+    if source.contains("function Assert-WriteAccess {") {
+        if !source.contains("function Test-WriteAccess {") {
+            return Err("最新引擎缺少 Test-WriteAccess。".into());
+        }
+        // The wrapper owns ACL changes. Keep the engine's boolean probes and
+        // Assert-WriteAccess failure path, including its optional-path handling.
+        return replace_function(
+            source,
+            "Grant-WriteAccess",
+            r#"function Grant-WriteAccess {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    return (Test-WriteAccess $Path)
+}"#,
+        );
+    }
+    let acl_call = "Enable-WriteAccess $resourcesPath";
+    if source.matches(acl_call).count() != 1 {
+        return Err("最新引擎的写权限调用结构已变化。".into());
+    }
+    Ok(source.replace(
+        acl_call,
+        "Write-Host '跳过引擎内部 ACL 更新；外层已授予原调用用户写权限。'",
+    ))
+}
+
 fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, String> {
     let source = fs::read_to_string(&engine.script).map_err(|error| error.to_string())?;
     // write_script adds one UTF-8 BOM; retaining the source BOM breaks PowerShell param().
@@ -865,14 +892,7 @@ fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, Str
         return Err("最新引擎的 Claude 目标选择结构已变化。".into());
     }
     content = content.replace(marker, "$script:DetectedUnpackagedClaudePaths = @()");
-    let acl_call = "Enable-WriteAccess $resourcesPath";
-    if content.matches(acl_call).count() != 1 {
-        return Err("最新引擎的写权限调用结构已变化。".into());
-    }
-    content = content.replace(
-        acl_call,
-        "Write-Host '跳过引擎内部 ACL 更新；外层已授予原调用用户写权限。'",
-    );
+    content = adapt_write_access(&content)?;
     content = replace_function(
         &content,
         "Patch-HardcodedFrontendStrings",
@@ -958,15 +978,23 @@ fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, Str
         }
     }"#;
     content = replace_function(&content, "Restore-LatestBackup", backup_guard)?;
-    let uninstall = r#"function Uninstall-WindowsLanguagePack {
+    let uninstall_write_check = if content.contains("function Assert-WriteAccess {") {
+        "Assert-WriteAccess $resourcesPath '恢复'"
+    } else {
+        ""
+    };
+    let uninstall = format!(
+        r#"function Uninstall-WindowsLanguagePack {{
         $paths=Get-ClaudeResourcesPath; $resourcesPath=$paths['Resources']
         Stop-ClaudeProcesses
+        {uninstall_write_check}
         Restore-LatestBackup $resourcesPath
         Remove-LanguageFiles $resourcesPath
         # Restored bundles already contain the original language lists; do not rewrite them.
         Set-ClaudeLocale 'en-US'
-    }"#;
-    content = replace_function(&content, "Uninstall-WindowsLanguagePack", uninstall)?;
+    }}"#
+    );
+    content = replace_function(&content, "Uninstall-WindowsLanguagePack", &uninstall)?;
     let adapted = engine
         .root
         .join("scripts")
@@ -1448,6 +1476,62 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
     }
 
     #[test]
+    fn write_access_adapter_preserves_probe_results_without_acl_changes() {
+        let source = r#"
+function Test-WriteAccess {
+    param([string]$Path)
+    return $script:writable
+}
+function Grant-WriteAccess {
+    param([string]$Path)
+    throw 'Engine must not change ACLs'
+}
+function Enable-WriteAccess {
+    param([string]$ResourcesPath)
+    return (Grant-WriteAccess $ResourcesPath)
+}
+function Assert-WriteAccess {
+    param([string]$ResourcesPath, [string]$Stage)
+    if (Enable-WriteAccess $ResourcesPath) { return }
+    throw "Write access denied: $Stage"
+}
+"#;
+        let adapted = adapt_write_access(source).unwrap();
+        let script = format!(
+            r#"$ErrorActionPreference='Stop'
+{adapted}
+$script:writable=$true
+Assert-WriteAccess $env:TEMP 'install'
+$script:writable=$false
+foreach ($stage in @('install', 'uninstall')) {{
+    $failure=$null
+    try {{ Assert-WriteAccess $env:TEMP $stage }} catch {{ $failure=$_.Exception.Message }}
+    if ($failure -ne "Write access denied: $stage") {{ throw 'Unwritable paths must fail' }}
+}}
+$missing=Join-Path $env:TEMP ([guid]::NewGuid().ToString('N'))
+if (-not (Grant-WriteAccess $missing)) {{ throw 'Optional missing paths should be skipped' }}
+"#
+        );
+        util::powershell(&script).unwrap();
+        assert!(adapt_write_access(
+            &source.replace("function Test-WriteAccess {", "function MissingProbe {")
+        )
+        .is_err());
+        assert!(adapt_write_access(
+            &source.replace("function Grant-WriteAccess {", "function MissingGrant {")
+        )
+        .is_err());
+        assert!(adapt_write_access("unknown engine").is_err());
+        assert!(adapt_write_access(
+            "Enable-WriteAccess $resourcesPath\nEnable-WriteAccess $resourcesPath"
+        )
+        .is_err());
+        assert!(!adapt_write_access("Enable-WriteAccess $resourcesPath")
+            .unwrap()
+            .contains("Enable-WriteAccess $resourcesPath"));
+    }
+
+    #[test]
     fn engine_adapter_parses_shared_shutdown_and_reused_frontend_function() {
         let root = std::env::temp_dir().join(format!(
             "claude-windows-cn-adapter-{}-{}",
@@ -1462,7 +1546,17 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
         let source = if let Ok(path) = env::var("CLAUDE_ASSISTANT_ENGINE_FIXTURE") {
             fs::read_to_string(path).unwrap()
         } else {
-            let mut source = String::from("\u{feff}param([string]$Fixture = 'ok')\n$script:DetectedUnpackagedClaudePaths = @(Get-UnpackagedClaudePaths)\nEnable-WriteAccess $resourcesPath\n");
+            let mut source = String::from("\u{feff}param([string]$Fixture = 'ok')\n$script:DetectedUnpackagedClaudePaths = @(Get-UnpackagedClaudePaths)\n");
+            source.push_str(r#"
+function Test-WriteAccess { param([string]$Path) return $true }
+function Grant-WriteAccess { param([string]$Path) throw 'Unexpected ACL change' }
+function Enable-WriteAccess { param([string]$ResourcesPath) return (Grant-WriteAccess $ResourcesPath) }
+function Assert-WriteAccess {
+    param([string]$ResourcesPath, [string]$Stage)
+    if (Enable-WriteAccess $ResourcesPath) { return }
+    throw "Write access denied: $Stage"
+}
+"#);
             for name in [
                 "Find-ClaudePath",
                 "Get-ClaudeConfigPaths",
@@ -1503,11 +1597,37 @@ if (-not $rejected -or $script:starts -ne 1) {{ throw 'Foreign service must not 
             wrapper.contains("-PatchMode"),
             source.contains("$PatchMode")
         );
-        let output = fs::read_to_string(adapted).unwrap();
+        let output = fs::read_to_string(&adapted).unwrap();
         assert!(!output.contains("Enable-WriteAccess $resourcesPath"));
         assert!(output.contains("function Stop-ClaudeProcesses {\n$ErrorActionPreference"));
         assert!(output.contains("GetOwnerSid"));
         assert!(output.contains("__effortLabelReplacementCount"));
+        if source.contains("function Assert-WriteAccess {") {
+            // Run only the adapted restore entry point with isolated dependencies.
+            // A failed probe must stop before any backup file can be copied.
+            let restore_check = format!(
+                r#"$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors)
+$entry=$ast.Find({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Uninstall-WindowsLanguagePack'}}, $true)
+. ([scriptblock]::Create($entry.Extent.Text))
+function Get-ClaudeResourcesPath {{ return @{{Resources='isolated'}} }}
+function Stop-ClaudeProcesses {{ }}
+function Assert-WriteAccess {{ if (-not $script:writable) {{ throw 'probe denied' }} }}
+function Restore-LatestBackup {{ $script:restored=$true }}
+function Remove-LanguageFiles {{ }}
+function Set-ClaudeLocale {{ }}
+$script:writable=$false; $script:restored=$false; $failure=$null
+try {{ Uninstall-WindowsLanguagePack }} catch {{ $failure=$_.Exception.Message }}
+if ($failure -ne 'probe denied' -or $script:restored) {{ throw 'Restore must check access before copying' }}
+$script:writable=$true
+Uninstall-WindowsLanguagePack
+if (-not $script:restored) {{ throw 'Writable restore must proceed' }}
+"#,
+                path = ps_path(&adapted)
+            );
+            util::powershell(&restore_check).unwrap();
+        }
         if !source.contains("Disable-FridaResidentForDiskInstall") {
             let legacy =
                 "function Disable-FridaResidentForDiskInstall { throw 'legacy side effect' }";
