@@ -883,6 +883,19 @@ fn adapt_write_access(source: &str) -> Result<String, String> {
     ))
 }
 
+fn adapt_cowork_backup(source: &str) -> Result<String, String> {
+    if !source.contains("Patch-CoworkService") {
+        return Ok(source.to_owned());
+    }
+    let backup = r#"$backupDir = Join-Path $backupRoot "init-backup""#;
+    if source.matches(backup).count() != 1 || !source.contains("function New-BackupSet {") {
+        return Err("最新引擎的 Cowork 备份结构已变化。".into());
+    }
+    // The service must join the same verified backup set as the frontend and Claude.exe.
+    // A second set would prevent both recording success and restoring the original files.
+    Ok(source.replace(backup, "$backupDir = New-BackupSet $ResourcesPath"))
+}
+
 fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, String> {
     let source = fs::read_to_string(&engine.script).map_err(|error| error.to_string())?;
     // write_script adds one UTF-8 BOM; retaining the source BOM breaks PowerShell param().
@@ -893,6 +906,7 @@ fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, Str
     }
     content = content.replace(marker, "$script:DetectedUnpackagedClaudePaths = @()");
     content = adapt_write_access(&content)?;
+    content = adapt_cowork_backup(&content)?;
     content = replace_function(
         &content,
         "Patch-HardcodedFrontendStrings",
@@ -1532,6 +1546,19 @@ if (-not (Grant-WriteAccess $missing)) {{ throw 'Optional missing paths should b
     }
 
     #[test]
+    fn cowork_backup_adapter_preserves_legacy_and_rejects_unknown_layout() {
+        let legacy = "function Install-WindowsLanguagePack { }";
+        assert_eq!(adapt_cowork_backup(legacy).unwrap(), legacy);
+        let source = r#"function New-BackupSet { }
+function Patch-CoworkService {
+    $backupDir = Join-Path $backupRoot "init-backup"
+}"#;
+        assert!(adapt_cowork_backup(&source.replace("init-backup", "unknown")).is_err());
+        assert!(adapt_cowork_backup(&source.replace("New-BackupSet", "Unknown")).is_err());
+        assert!(adapt_cowork_backup(&format!("{source}\n{source}")).is_err());
+    }
+
+    #[test]
     fn engine_adapter_parses_shared_shutdown_and_reused_frontend_function() {
         let root = std::env::temp_dir().join(format!(
             "claude-windows-cn-adapter-{}-{}",
@@ -1555,6 +1582,23 @@ function Assert-WriteAccess {
     param([string]$ResourcesPath, [string]$Stage)
     if (Enable-WriteAccess $ResourcesPath) { return }
     throw "Write access denied: $Stage"
+}
+function Get-BackupRoot { param($ResourcesPath) return (Join-Path $ResourcesPath '.zh-cn-backups') }
+function New-BackupSet {
+    param($ResourcesPath)
+    return (Get-ChildItem -LiteralPath (Get-BackupRoot $ResourcesPath) -Directory | Select-Object -First 1).FullName
+}
+function Patch-CoworkService {
+    param($ResourcesPath)
+    $backupRoot = Get-BackupRoot $ResourcesPath
+    $svcPath = Join-Path $ResourcesPath 'cowork-svc.exe'
+    # The upstream backup block; binary instruction patching is outside this fixture.
+    $backupDir = Join-Path $backupRoot "init-backup"
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $backupFileTarget = Join-Path $backupDir "cowork-svc.exe"
+    if (-not (Test-Path -LiteralPath $backupFileTarget)) {
+        Copy-Item -LiteralPath $svcPath -Destination $backupFileTarget -Force
+    }
 }
 "#);
             for name in [
@@ -1602,6 +1646,68 @@ function Assert-WriteAccess {
         assert!(output.contains("function Stop-ClaudeProcesses {\n$ErrorActionPreference"));
         assert!(output.contains("GetOwnerSid"));
         assert!(output.contains("__effortLabelReplacementCount"));
+        if source.contains("function Patch-CoworkService {") {
+            let resources = root.join("resources");
+            let backup_root = resources.join(".zh-cn-backups");
+            let backup = backup_root.join("20261101-120000");
+            fs::create_dir_all(&backup).unwrap();
+            fs::write(backup.join("ion-dist.asar"), b"original frontend").unwrap();
+            let service = resources.join("cowork-svc.exe");
+            fs::write(&service, b"original service").unwrap();
+            let original_hash = util::sha256(&service).unwrap();
+            // Execute the real backup statements from the adapted function, including when
+            // a full upstream snapshot is supplied. Never run its installer or service control.
+            let load = format!(
+                r#"$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors)
+$functions=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}}, $true)
+foreach ($name in @('Get-BackupRoot','New-BackupSet','Restore-LatestBackup')) {{
+    $definition=@($functions | Where-Object {{ $_.Name -eq $name }})
+    if ($definition.Count -ne 1) {{ throw "Missing function: $name" }}
+    . ([scriptblock]::Create($definition[0].Extent.Text))
+}}
+$ResourcesPath={resources}
+$backupRoot=Get-BackupRoot $ResourcesPath
+$svcPath=Join-Path $ResourcesPath 'cowork-svc.exe'
+"#,
+                path = ps_path(&adapted),
+                resources = ps_path(&resources),
+            );
+            let patch_backup = format!(
+                r#"{load}
+$patch=$functions | Where-Object {{ $_.Name -eq 'Patch-CoworkService' }}
+$statements=@($patch.Body.EndBlock.Statements)
+$start=-1
+for ($i=0; $i -lt $statements.Count; $i++) {{
+    if ($statements[$i].Extent.Text.StartsWith('$backupDir =')) {{ $start=$i; break }}
+}}
+if ($start -lt 0) {{ throw 'Cowork backup block not found' }}
+$block=[scriptblock]::Create(($statements[$start..($start+3)] | ForEach-Object {{ $_.Extent.Text }}) -join "`n")
+. $block
+[IO.File]::WriteAllText($svcPath, 'patched service')
+. $block
+"#
+            );
+            // First apply and reapply must both retain the original service and one backup set.
+            for _ in 0..2 {
+                util::powershell(&patch_backup).unwrap();
+                assert_eq!(unique_backup_set(&backup_root).unwrap(), backup);
+                let files = collect_backup_files(&backup).unwrap();
+                assert_eq!(files.len(), 2);
+                assert!(files.iter().any(|file| {
+                    file.relative_path == "cowork-svc.exe" && file.sha256 == original_hash
+                }));
+                assert_ne!(util::sha256(&service).unwrap(), original_hash);
+                // Manual restore and failed-apply rollback share this adapted entry point.
+                util::powershell(&format!("{load}\nRestore-LatestBackup $ResourcesPath")).unwrap();
+                assert_eq!(util::sha256(&service).unwrap(), original_hash);
+                assert_eq!(
+                    fs::read(resources.join("ion-dist.asar")).unwrap(),
+                    b"original frontend"
+                );
+            }
+        }
         if source.contains("function Assert-WriteAccess {") {
             // Run only the adapted restore entry point with isolated dependencies.
             // A failed probe must stop before any backup file can be copied.

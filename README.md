@@ -76,7 +76,7 @@ macOS 解压后运行 `Claude 中文助手.app`。预览包使用 ad-hoc 本地�
 
 macOS 的汉化和恢复还需要 **Python 3.9 或更新版本**，可通过 [python.org](https://www.python.org/downloads/macos/) 或 Homebrew 安装。助手会检查依赖，缺少时明确提示，不会自动安装 Python；Claude 的安装、更新与启动不需要 Python。
 
-当前版本的验证范围与已知限制见 [更新日志](CHANGELOG.md#029---2026-11-01)。
+当前版本的验证范围与已知限制见 [更新日志](CHANGELOG.md#0212---2026-11-08)。
 
 ## 常见问题
 
