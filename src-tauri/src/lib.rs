@@ -153,20 +153,28 @@ fn open_data_dir() -> Result<(), String> {
         .map_err(|error| format!("无法打开 {}：{error}", path.display()))
 }
 
-// Opens only the built-in plugin page, so the frontend cannot hand it other URLs.
+// Commands expose only built-in pages, so the frontend cannot hand them other URLs.
 #[tauri::command]
 fn open_reply_guard_page() -> Result<(), String> {
-    const URL: &str = "https://github.com/chrichuang218/claude-zh-reply-guard";
+    open_web_page("https://github.com/chrichuang218/claude-zh-reply-guard")
+}
+
+#[tauri::command]
+fn open_project_page() -> Result<(), String> {
+    open_web_page("https://github.com/chrichuang218/claude-desktop-cn")
+}
+
+fn open_web_page(url: &str) -> Result<(), String> {
     let program = if cfg!(target_os = "macos") {
         "/usr/bin/open"
     } else {
         "explorer.exe"
     };
     std::process::Command::new(program)
-        .arg(URL)
+        .arg(url)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("无法打开 {URL}：{error}"))
+        .map_err(|error| format!("无法打开 {url}：{error}"))
 }
 
 #[tauri::command]
@@ -270,6 +278,7 @@ pub fn run() {
             cancel_operation,
             open_data_dir,
             open_reply_guard_page,
+            open_project_page,
             open_claude,
             choose_assistant_install_path,
         ])

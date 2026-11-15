@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window'
-import { ArrowRight, Check, ClipboardCopy, Copy, Download, ExternalLink, FolderOpen, Info, Languages, LayoutDashboard, MessageSquareText, Minus, Play, RefreshCw, Settings2, Square, TriangleAlert, X } from 'lucide-react'
+import { ArrowRight, ArrowUpRight, Check, ClipboardCopy, Copy, Download, ExternalLink, FolderOpen, Info, Languages, LayoutDashboard, MessageSquareText, Minus, Play, RefreshCw, Settings2, Square, Star, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import './App.css'
@@ -548,6 +548,14 @@ function App() {
     }
   }
 
+  const openProjectPage = async () => {
+    try {
+      await invoke<void>('open_project_page')
+    } catch (error) {
+      setActionError(`无法打开 GitHub 项目：${errorText(error)}`)
+    }
+  }
+
   const copyText = async (key: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text)
@@ -684,6 +692,11 @@ function App() {
               <div className="ca-status-card">
                 <div className="ca-row"><span className="ca-row-icon"><Download aria-hidden="true" /></span><div><h3>应用更新</h3>{claude?.installed ? <p>{claudeChecking ? '正在检查更新…' : <>{claude.updateCheckError || (claude.updateAvailable != null ? claude.updateAvailable ? '已发现新版本，可随时更新' : '已是最新版本' : '尚未检查最新版本')}{claudeChecked ? <span className="ca-checked"> · {claudeChecked}</span> : null}</>}</p> : <p>安装 Claude 后可检查更新</p>}</div>{claude?.installed ? <button type="button" className="ca-text-button" onClick={() => void startOperation('check_claude_update')} disabled={busy || claudeChecking}><RefreshCw aria-hidden="true" />检查更新</button> : null}</div>
                 <div className="ca-row"><span className="ca-row-icon"><Languages aria-hidden="true" /></span><div><h3>中文界面</h3><p data-warning={Boolean(claude?.patchRecoveryRequired || staleMode)}>{localizeCopy}</p></div>{claude?.installed ? <button type="button" className="ca-text-button" onClick={() => navigate('localize')} disabled={busy}>前往汉化<ArrowRight aria-hidden="true" /></button> : null}</div>
+                <div className="ca-row ca-star-prompt">
+                  <span className="ca-row-icon"><Star aria-hidden="true" /></span>
+                  <div><h3>支持项目</h3><p>用得顺手的话，欢迎留一颗 Star。</p></div>
+                  <button type="button" className="ca-text-button ca-star-button" onClick={() => void openProjectPage()} aria-label="在浏览器中打开 GitHub 项目，支持 Claude 中文助手">GitHub<ArrowUpRight aria-hidden="true" /></button>
+                </div>
               </div>
             </section> : null}
 

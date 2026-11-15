@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "claude-windows-cn"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "reqwest",
  "serde",
