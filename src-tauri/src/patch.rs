@@ -18,6 +18,7 @@ const ENGINE_URL: &str =
 const ENGINE_DOWNLOAD_URL: &str =
     "https://codeload.github.com/javaht/claude-desktop-zh-cn/zip/refs/heads/main";
 pub(crate) const ENGINE_DIR: &str = "patch-engine";
+const WINDOWS_PATCH_IO_FUNCTIONS: &str = include_str!("windows_patch_io.ps1");
 
 // Reused from claude-desktop-zh: retain its bundle batching and effort-label adaptation.
 const FAST_HARDCODED_FRONTEND_PATCH_FUNCTION: &str = r#"
@@ -624,36 +625,43 @@ fn apply_with_engine(
     engine: &Engine,
     operation: &OperationState,
 ) -> Result<OperationOutcome, String> {
-    let backup_root = package.resources().join(".zh-cn-backups");
     let script = adapt_engine(engine, package)?;
-    let pending = if existing.is_none() {
-        let pending = PendingPatch {
-            package_full_name: package.package_full_name.clone(),
-            version: package.version.clone(),
-            install_location: package.install_location.clone(),
-            engine_sha256: engine.sha256.clone(),
-        };
-        Some(pending)
-    } else {
-        None
+    apply_transaction(
+        mode,
+        package,
+        existing,
+        engine,
+        operation,
+        |action, pending| run_engine(engine, &script, package, action, pending, operation),
+    )
+}
+
+fn apply_transaction(
+    mode: &str,
+    package: &ClaudePackage,
+    existing: Option<BackupManifest>,
+    engine: &Engine,
+    operation: &OperationState,
+    mut run: impl FnMut(&str, Option<&PendingPatch>) -> Result<String, String>,
+) -> Result<OperationOutcome, String> {
+    let backup_root = package.resources().join(".zh-cn-backups");
+    let pending = PendingPatch {
+        package_full_name: package.package_full_name.clone(),
+        version: package.version.clone(),
+        install_location: package.install_location.clone(),
+        engine_sha256: engine.sha256.clone(),
     };
     let result = (|| {
-        if let Some(mut manifest) = existing {
+        if let Some(mut manifest) = existing.clone() {
             operation.step("按当前版本备份恢复原始文件");
-            run_engine(engine, &script, package, "uninstall", None, operation)?;
+            // Reapply can already mutate files during its initial restore.
+            run("uninstall", Some(&pending))?;
             verify_restored(&manifest, package)?;
             manifest.applied_mode = None;
             save_manifest(&manifest)?;
         }
         operation.step("应用简体中文资源");
-        run_engine(
-            engine,
-            &script,
-            package,
-            "install",
-            pending.as_ref(),
-            operation,
-        )?;
+        run("install", existing.is_none().then_some(&pending))?;
         let set = unique_backup_set(&backup_root)?;
         let files = collect_backup_files(&set)?;
         if files.is_empty() {
@@ -672,20 +680,25 @@ fn apply_with_engine(
             engine_sha256: engine.sha256.clone(),
         };
         save_manifest(&manifest)?;
-        if pending.is_some() {
-            clear_pending()?;
-        }
+        clear_pending()?;
         Ok(OperationOutcome::done("简体中文已应用。"))
     })();
-    match (pending, result) {
-        (Some(pending), Err(error)) => {
+    match result {
+        Err(error) => {
             operation.log(format!("汉化失败：{error}"));
             // The elevated wrapper records the transaction immediately before engine writes.
             // UAC / preflight failures have no transaction to roll back.
             if read_pending()?.is_none() {
                 return Err(error);
             }
-            match rollback_first_apply(&pending, package, engine, &script, operation) {
+            match rollback_apply(
+                &pending,
+                existing.as_ref(),
+                package,
+                engine,
+                operation,
+                &mut run,
+            ) {
                 Ok(()) => Err(format!("{error}；操作失败但已验证回滚。")),
                 Err(rollback_error) => Err(format!(
                     "{error}；无法证明安全恢复：{rollback_error}。{}",
@@ -693,7 +706,7 @@ fn apply_with_engine(
                 )),
             }
         }
-        (_, result) => result,
+        result => result,
     }
 }
 
@@ -718,12 +731,13 @@ fn unique_backup_set(root: &Path) -> Result<PathBuf, String> {
     Ok(entry.path())
 }
 
-fn rollback_first_apply(
+fn rollback_apply(
     pending: &PendingPatch,
+    existing: Option<&BackupManifest>,
     package: &ClaudePackage,
     engine: &Engine,
-    script: &Path,
     operation: &OperationState,
+    run: &mut impl FnMut(&str, Option<&PendingPatch>) -> Result<String, String>,
 ) -> Result<(), String> {
     if pending.package_full_name != package.package_full_name
         || pending.version != package.version
@@ -737,6 +751,18 @@ fn rollback_first_apply(
     if files.is_empty() {
         return Err("本次备份为空".into());
     }
+    // Reapply may add backups for newly patched files, but must preserve all recorded originals.
+    if let Some(existing) = existing {
+        for original in &existing.files {
+            if !files.iter().any(|file| {
+                file.relative_path == original.relative_path
+                    && file.sha256 == original.sha256
+                    && file.size == original.size
+            }) {
+                return Err(format!("原始备份已变化：{}", original.relative_path));
+            }
+        }
+    }
     let mut manifest = BackupManifest {
         package_full_name: package.package_full_name.clone(),
         version: package.version.clone(),
@@ -747,8 +773,8 @@ fn rollback_first_apply(
         engine_sha256: engine.sha256.clone(),
     };
     validate_backup(&manifest, package)?;
-    operation.step("汉化失败，恢复本次备份");
-    run_engine(engine, script, package, "uninstall", None, operation)?;
+    operation.step("汉化失败，恢复当前版本原始文件");
+    run("uninstall", None)?;
     verify_restored(&manifest, package)?;
     manifest.applied_mode = None;
     save_manifest(&manifest)?;
@@ -988,10 +1014,19 @@ fn adapt_engine(engine: &Engine, package: &ClaudePackage) -> Result<PathBuf, Str
                 $target=Join-Path (Split-Path -Parent $ResourcesPath) $relative.Substring(5)
             } else { $target=Join-Path $ResourcesPath $relative }
             New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-            Copy-Item -LiteralPath $file.FullName -Destination $target -Force -ErrorAction Stop
+            Invoke-AssistantFileRetry -Path $target -Action {
+                Copy-Item -LiteralPath $file.FullName -Destination $target -Force -ErrorAction Stop
+            }
         }
     }"#;
-    content = replace_function(&content, "Restore-LatestBackup", backup_guard)?;
+    if content.contains("Sync-ClaudeExeAsarIntegrity") {
+        content = replace_function(&content, "Sync-ClaudeExeAsarIntegrity", "")?;
+    }
+    content = replace_function(
+        &content,
+        "Restore-LatestBackup",
+        &format!("{WINDOWS_PATCH_IO_FUNCTIONS}\n{backup_guard}"),
+    )?;
     let uninstall_write_check = if content.contains("function Assert-WriteAccess {") {
         "Assert-WriteAccess $resourcesPath '恢复'"
     } else {
@@ -1150,6 +1185,171 @@ fn engine_wrapper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_patch_io_handles_transient_and_persistent_locks() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let output = util::powershell(&format!(
+            "& {} -FunctionsPath {}",
+            ps_path(&root.join("../tests/windows_patch_io.ps1")),
+            ps_path(&root.join("src/windows_patch_io.ps1"))
+        ))
+        .unwrap();
+        assert!(output.contains("PATCH_IO_OK"), "{output}");
+    }
+
+    #[test]
+    fn failed_apply_transactions_restore_originals_or_retain_recovery_record() {
+        const CHILD: &str = "CLAUDE_PATCH_TRANSACTION_TEST";
+        if env::var_os(CHILD).is_none() {
+            let root = env::temp_dir().join(format!("claude-rollback-test-{}", std::process::id()));
+            fs::create_dir_all(&root).unwrap();
+            let output = std::process::Command::new(env::current_exe().unwrap())
+                .args(["--exact", "patch::tests::failed_apply_transactions_restore_originals_or_retain_recovery_record", "--nocapture"])
+                .env(CHILD, "1")
+                .env("LOCALAPPDATA", &root)
+                .output().unwrap();
+            fs::remove_dir_all(root).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let data = util::data_dir().unwrap();
+        fs::create_dir_all(&data).unwrap();
+        for case in [
+            "first",
+            "reapply",
+            "initial_restore",
+            "validation",
+            "rollback_failure",
+            "preflight",
+            "success",
+        ] {
+            let root = data.join(case);
+            let package = ClaudePackage {
+                package_full_name: "fixture".into(),
+                version: "1".into(),
+                install_location: root.display().to_string(),
+                package_family_name: "fixture".into(),
+                architecture: "X64".into(),
+            };
+            fs::create_dir_all(package.resources()).unwrap();
+            fs::write(package.exe(), b"original").unwrap();
+            let backup = package.resources().join(".zh-cn-backups/original");
+            let make_backup = || {
+                fs::create_dir_all(backup.join("_app")).unwrap();
+                fs::copy(package.exe(), backup.join("_app/Claude.exe")).unwrap();
+            };
+            let existing = if case == "first" {
+                None
+            } else {
+                make_backup();
+                let manifest = BackupManifest {
+                    package_full_name: package.package_full_name.clone(),
+                    version: package.version.clone(),
+                    install_location: package.install_location.clone(),
+                    backup_set: backup.display().to_string(),
+                    files: collect_backup_files(&backup).unwrap(),
+                    applied_mode: Some("safe".into()),
+                    engine_sha256: "previous".into(),
+                };
+                save_manifest(&manifest).unwrap();
+                fs::write(package.exe(), b"previous localization").unwrap();
+                Some(manifest)
+            };
+            let engine = Engine {
+                work: root.clone(),
+                root: root.clone(),
+                script: root.join("unused.ps1"),
+                sha256: "fixture".into(),
+            };
+            let operation = OperationState::new();
+            let mut actions = Vec::new();
+            let mut restores = 0;
+            let result = apply_transaction(
+                "safe",
+                &package,
+                existing,
+                &engine,
+                &operation,
+                |action, pending| {
+                    actions.push(action.to_string());
+                    if case == "preflight" {
+                        return Err("fixture preflight failure".into());
+                    }
+                    if let Some(pending) = pending {
+                        use std::io::Write;
+                        let mut file = fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(pending_path().unwrap())
+                            .unwrap();
+                        file.write_all(&serde_json::to_vec(pending).unwrap())
+                            .unwrap();
+                    }
+                    assert!(
+                        read_pending().unwrap().is_some(),
+                        "missing transaction before {action}"
+                    );
+                    if action == "uninstall" {
+                        restores += 1;
+                        if case == "initial_restore" && restores == 1 {
+                            fs::write(package.exe(), b"partial restore").unwrap();
+                            return Err("fixture initial restore failure".into());
+                        }
+                        if case == "rollback_failure" && restores == 2 {
+                            return Err("fixture rollback failure".into());
+                        }
+                        fs::copy(backup.join("_app/Claude.exe"), package.exe()).unwrap();
+                        return Ok(String::new());
+                    }
+                    if case == "first" {
+                        make_backup();
+                    }
+                    fs::write(package.exe(), b"partial patch").unwrap();
+                    if case == "success" {
+                        let locale = package.resources().join("ion-dist/i18n/zh-CN.json");
+                        fs::create_dir_all(locale.parent().unwrap()).unwrap();
+                        fs::write(locale, r#"{"hello":"你好"}"#).unwrap();
+                        return Ok(String::new());
+                    }
+                    if case == "validation" {
+                        return Ok(String::new());
+                    }
+                    Err("fixture patch failure".into())
+                },
+            );
+            if case == "success" {
+                assert!(result.is_ok());
+                assert!(!pending_path().unwrap().exists());
+                assert_eq!(
+                    read_manifest().unwrap().unwrap().applied_mode.as_deref(),
+                    Some("safe")
+                );
+            } else {
+                let error = result.err().expect("fixture must fail");
+                if case == "preflight" {
+                    assert!(!pending_path().unwrap().exists());
+                    assert_eq!(actions, ["uninstall"]);
+                    assert_eq!(fs::read(package.exe()).unwrap(), b"previous localization");
+                } else if case == "rollback_failure" {
+                    assert!(error.contains("无法证明安全恢复"), "{error}");
+                    assert!(pending_path().unwrap().is_file());
+                    clear_pending().unwrap();
+                } else {
+                    assert!(error.contains("已验证回滚"), "{case}: {error}");
+                    assert_eq!(fs::read(package.exe()).unwrap(), b"original");
+                    assert!(!pending_path().unwrap().exists());
+                    assert!(read_manifest().unwrap().unwrap().applied_mode.is_none());
+                    assert_eq!(actions.last().unwrap(), "uninstall");
+                }
+            }
+        }
+    }
 
     fn write_locale_asar(path: &Path, language: &str, catalog: &[u8]) {
         let header = serde_json::json!({"files": {"i18n": {"files": {
@@ -1662,7 +1862,7 @@ function Patch-CoworkService {
 $tokens=$null; $errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile({path}, [ref]$tokens, [ref]$errors)
 $functions=$ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]}}, $true)
-foreach ($name in @('Get-BackupRoot','New-BackupSet','Restore-LatestBackup')) {{
+foreach ($name in @('Get-BackupRoot','New-BackupSet','Invoke-AssistantFileRetry','Restore-LatestBackup')) {{
     $definition=@($functions | Where-Object {{ $_.Name -eq $name }})
     if ($definition.Count -ne 1) {{ throw "Missing function: $name" }}
     . ([scriptblock]::Create($definition[0].Extent.Text))
